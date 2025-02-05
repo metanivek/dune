@@ -1,222 +1,88 @@
 open Import
 
-module Variable = struct
-  module Sys = struct
-    module T = struct
-      type t =
-        [ `Arch
-        | `Os
-        | `Os_version
-        | `Os_distribution
-        | `Os_family
-        ]
+type t = Variable_value.t Package_variable_name.Map.t
 
-      let to_string = function
-        | `Arch -> "arch"
-        | `Os -> "os"
-        | `Os_version -> "os-version"
-        | `Os_distribution -> "os-distribution"
-        | `Os_family -> "os-family"
-      ;;
+let empty = Package_variable_name.Map.empty
+let equal = Package_variable_name.Map.equal ~equal:Variable_value.equal
+let to_dyn = Package_variable_name.Map.to_dyn Variable_value.to_dyn
+let is_empty = Package_variable_name.Map.is_empty
 
-      let compare a b = String.compare (to_string a) (to_string b)
-      let to_dyn t = Dyn.string (to_string t)
-      let all = [ `Arch; `Os; `Os_version; `Os_distribution; `Os_family ]
-    end
-
-    include T
-
-    let of_string_opt s = List.find all ~f:(fun t -> String.equal s (to_string t))
-
-    let decode =
-      let open Decoder in
-      let+ loc, name = located string in
-      match of_string_opt name with
-      | Some t -> t
-      | None ->
-        User_error.raise
-          ~loc
-          [ Pp.textf "No such sys variable: %s" (String.maybe_quoted name)
-          ; Pp.textf
-              "Valid variables: %s"
-              (String.enumerate_and
-                 (List.map T.all ~f:(fun v -> String.maybe_quoted @@ to_string v)))
-          ]
-    ;;
-
-    module Map = Map.Make (T)
-
-    module Bindings = struct
-      type t = string Map.t
-
-      let empty = Map.empty
-      let to_dyn = Map.to_dyn Dyn.string
-      let equal = Map.equal ~equal:String.equal
-      let set = Map.set
-      let get = Map.find
-
-      let decode =
-        let open Decoder in
-        let+ loc, bindings = located (repeat (pair decode string)) in
-        match Map.of_list bindings with
-        | Ok t -> t
-        | Error (duplicate_key, a, b) ->
-          User_error.raise
-            ~loc
-            [ Pp.textf
-                "Duplicate entries for sys variable %s (%s, %s)"
-                (String.maybe_quoted (to_string duplicate_key))
-                (String.maybe_quoted a)
-                (String.maybe_quoted b)
-            ]
-      ;;
-
-      let extend t t' = Map.superpose t' t
-
-      let pp t =
-        Pp.enumerate all ~f:(fun variable ->
-          match Map.find t variable with
-          | Some value ->
-            Pp.textf "%s = %s" (to_string variable) (String.maybe_quoted value)
-          | None -> Pp.textf "%s (unset)" (to_string variable))
-      ;;
-    end
-  end
-
-  module Const = struct
-    type t = [ `Opam_version ]
-
-    let to_string = function
-      | `Opam_version -> "opam-version"
-    ;;
-
-    let to_dyn t = Dyn.string (to_string t)
-    let all = [ `Opam_version ]
-    let of_string_opt s = List.find all ~f:(fun t -> String.equal s (to_string t))
-
-    module Bindings = struct
-      type t = { opam_version : string }
-
-      let to_dyn { opam_version } = Dyn.(record [ "opam_version", string opam_version ])
-      let equal { opam_version } t = String.equal opam_version t.opam_version
-
-      let get { opam_version } = function
-        | `Opam_version -> opam_version
-      ;;
-
-      let pp { opam_version } =
-        Pp.enumerate
-          [ `Opam_version, opam_version ]
-          ~f:(fun (variable, value) -> Pp.textf "%s = %s" (to_string variable) value)
-      ;;
-    end
-
-    let bindings = { Bindings.opam_version = OpamVersion.to_string OpamVersion.current }
-  end
-
-  module T = struct
-    type t =
-      | Sys of Sys.t
-      | Const of Const.t
-
-    let to_dyn = function
-      | Sys sys -> Dyn.variant "Sys" [ Sys.to_dyn sys ]
-      | Const const -> Dyn.variant "Const" [ Const.to_dyn const ]
-    ;;
-
-    let of_string_opt string =
-      match Sys.of_string_opt string with
-      | Some sys -> Some (Sys sys)
-      | None -> Const.of_string_opt string |> Option.map ~f:(fun const -> Const const)
-    ;;
-
-    let to_string = function
-      | Sys sys -> Sys.to_string sys
-      | Const const -> Const.to_string const
-    ;;
-
-    let compare a b = String.compare (to_string a) (to_string b)
-    let equal a b = String.equal (to_string a) (to_string b)
-
-    let decode =
-      let open Decoder in
-      let+ loc, string = located string in
-      match of_string_opt string with
-      | Some t -> t
-      | None ->
-        User_error.raise
-          ~loc
-          [ Pp.textf "No such variable: %s" (String.maybe_quoted string) ]
-    ;;
-
-    let encode t = Encoder.string (to_string t)
-  end
-
-  include Comparable.Make (T)
-  include T
-end
-
-type t =
-  { sys : Variable.Sys.Bindings.t
-  ; const : Variable.Const.Bindings.t
-  }
-
-module Fields = struct
-  let sys = "sys"
-  let const = "const"
-end
-
-let create ~sys = { sys; const = Variable.Const.bindings }
-let default = create ~sys:Variable.Sys.Bindings.empty
-
-let decode =
-  let open Decoder in
-  fields
-  @@
-  let+ sys = field Fields.sys ~default:default.sys Variable.Sys.Bindings.decode in
-  let const = default.const in
-  { sys; const }
-;;
-
-let to_dyn { sys; const } =
-  Dyn.record
-    [ Fields.sys, Variable.Sys.Bindings.to_dyn sys
-    ; Fields.const, Variable.Const.Bindings.to_dyn const
-    ]
-;;
-
-let equal { sys; const } t =
-  Variable.Sys.Bindings.equal sys t.sys && Variable.Const.Bindings.equal const t.const
-;;
-
-let sys { sys; _ } = sys
-let set_sys t sys = { t with sys }
-
-let pp =
-  let pp_section heading pp_section =
-    (* The hbox is to prevent long values in [pp_section] from causing the heading to wrap. *)
-    let pp_heading = Pp.hbox (Pp.text heading) in
-    Pp.concat ~sep:Pp.space [ pp_heading; pp_section ] |> Pp.vbox
-  in
-  fun { sys; const } ->
-    Pp.enumerate
-      ~f:Fun.id
-      [ pp_section "System Environment Variables" (Variable.Sys.Bindings.pp sys)
-      ; pp_section "Constants" (Variable.Const.Bindings.pp const)
+let validate t ~loc =
+  if Package_variable_name.Map.mem t Package_variable_name.with_test
+  then
+    User_error.raise
+      ?loc
+      [ Pp.textf
+          "Setting the %S solver variable is not permitted as it would conflict with \
+           dune's internal use of %S while solving opam packages."
+          Package_variable_name.(to_string with_test)
+          Package_variable_name.(to_string with_test)
       ]
 ;;
 
-module Variable_value = struct
-  type t =
-    | String of string
-    | Unset_sys
-end
+let decode =
+  let open Decoder in
+  let+ loc, bindings =
+    located (repeat (pair Package_variable_name.decode Variable_value.decode))
+  in
+  match Package_variable_name.Map.of_list bindings with
+  | Ok t ->
+    validate t ~loc:(Some loc);
+    t
+  | Error (duplicate_key, a, b) ->
+    User_error.raise
+      ~loc
+      [ Pp.textf
+          "Duplicate entries for user variable %s (%s, %s)"
+          (String.maybe_quoted (Package_variable_name.to_string duplicate_key))
+          (String.maybe_quoted (Variable_value.to_string a))
+          (String.maybe_quoted (Variable_value.to_string b))
+      ]
+;;
 
-let get t variable =
-  match (variable : Variable.t) with
-  | Const const -> Variable_value.String (Variable.Const.Bindings.get t.const const)
-  | Sys sys ->
-    (match Variable.Sys.Bindings.get t.sys sys with
-     | Some value -> String value
-     | None -> Unset_sys)
+let set t variable_name variable_value =
+  let t = Package_variable_name.Map.set t variable_name variable_value in
+  validate t ~loc:None;
+  t
+;;
+
+let get = Package_variable_name.Map.find
+let extend a b = Package_variable_name.Map.superpose b a
+
+let with_defaults =
+  [ ( Package_variable_name.opam_version
+    , OpamVersion.to_string OpamVersion.current |> Variable_value.string )
+  ; Package_variable_name.with_doc, Variable_value.false_
+  ; Package_variable_name.with_dev_setup, Variable_value.false_
+  ; Package_variable_name.post, Variable_value.true_
+  ]
+  |> List.fold_left ~init:empty ~f:(fun acc (name, value) -> set acc name value)
+;;
+
+let pp t =
+  if Package_variable_name.Map.is_empty t
+  then Pp.text "(empty)"
+  else
+    Pp.enumerate (Package_variable_name.Map.to_list t) ~f:(fun (variable, value) ->
+      Pp.textf
+        "%s = %s"
+        (Package_variable_name.to_string variable)
+        (String.maybe_quoted (Variable_value.to_string value)))
+;;
+
+let unset = Package_variable_name.Map.remove
+
+let unset_multi t variable_names =
+  Package_variable_name.Set.fold variable_names ~init:t ~f:(fun variable_name t ->
+    unset t variable_name)
+;;
+
+let to_env t variable =
+  match OpamVariable.Full.scope variable with
+  | Self | Package _ -> None
+  | Global ->
+    let variable_name =
+      OpamVariable.Full.variable variable |> Package_variable_name.of_opam
+    in
+    get t variable_name |> Option.map ~f:Variable_value.to_opam_variable_contents
 ;;

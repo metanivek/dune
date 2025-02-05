@@ -53,6 +53,7 @@ module Var = struct
       | Group
       | Jobs
       | Arch
+      | Sys_ocaml_version
       | Section_dir of Section.t
 
     let compare = Poly.compare
@@ -71,6 +72,7 @@ module Var = struct
       | Group -> variant "Group" []
       | Jobs -> variant "Jobs" []
       | Arch -> variant "Arch" []
+      | Sys_ocaml_version -> variant "Sys_ocaml_version" []
       | Section_dir section ->
         variant "Section_dir" [ string (Section.to_string section) ]
     ;;
@@ -87,6 +89,7 @@ module Var = struct
       | Group -> "group"
       | Jobs -> "jobs"
       | Arch -> "arch"
+      | Sys_ocaml_version -> "sys_ocaml_version"
       | Section_dir section -> Section.to_string section
     ;;
   end
@@ -209,6 +212,7 @@ module Var = struct
        | "group" -> Some (Pkg Group)
        | "jobs" -> Some (Pkg Jobs)
        | "arch" -> Some (Pkg Arch)
+       | "sys-ocaml-version" -> Some (Pkg Sys_ocaml_version)
        | _ -> None)
   ;;
 end
@@ -257,6 +261,7 @@ module Macro = struct
         }
     | Lib_available
     | Bin_available
+    | File_available
     | Version
     | Read
     | Read_strings
@@ -292,6 +297,9 @@ module Macro = struct
     | Bin_available, Bin_available -> Eq
     | Bin_available, _ -> Lt
     | _, Bin_available -> Gt
+    | File_available, File_available -> Eq
+    | File_available, _ -> Lt
+    | _, File_available -> Gt
     | Version, Version -> Eq
     | Version, _ -> Lt
     | _, Version -> Gt
@@ -337,6 +345,7 @@ module Macro = struct
         [ record [ "lib_exec", bool lib_exec; "lib_private", bool lib_private ] ]
     | Lib_available -> string "Lib_available"
     | Bin_available -> string "Bin_available"
+    | File_available -> string "File_available"
     | Version -> string "Version"
     | Read -> string "Read"
     | Read_strings -> string "Read_strings"
@@ -360,6 +369,7 @@ module Macro = struct
     | Lib { lib_exec = true; lib_private = true } -> Ok "libexec-private"
     | Lib_available -> Ok "lib-available"
     | Bin_available -> Ok "bin-available"
+    | File_available -> Ok "file-available"
     | Version -> Ok "version"
     | Read -> Ok "read"
     | Read_strings -> Ok "read-strings"
@@ -572,6 +582,7 @@ module Env = struct
         ; "group", Group
         ; "arch", Arch
         ; "jobs", Jobs
+        ; "sys_ocaml_version", Sys_ocaml_version
         ]
         |> List.rev_append
              (List.rev_map Var.Pkg.Section.all ~f:(fun (section, name) ->
@@ -603,6 +614,7 @@ module Env = struct
            , since ~version:(2, 1) (Macro.Lib { lib_exec = true; lib_private = true }) )
          ; "lib-available", macro Lib_available
          ; "bin-available", since ~version:(3, 0) Macro.Bin_available
+         ; "file-available", macro File_available
          ; "version", macro Version
          ; "read", macro Read
          ; "read-lines", macro Read_lines

@@ -50,8 +50,8 @@ let ls_term (fetch_results : Path.Build.t -> string list Action_builder.t) =
           Action_builder.of_memo
           @@
           let open Memo.O in
-          let* exists = Source_tree.find_dir src_dir in
-          match exists with
+          Source_tree.find_dir src_dir
+          >>= function
           | Some _ -> Memo.return ()
           | None ->
             (* The directory didn't exist. We therefore check if it was a
@@ -105,7 +105,7 @@ module Aliases_cmd = struct
   let term = ls_term fetch_results
 
   let command =
-    let doc = "Print aliases in a given directory. Works similalry to ls." in
+    let doc = "Print aliases in a given directory. Works similarly to ls." in
     Cmd.v (Cmd.info "aliases" ~doc ~envs:Common.envs) term
   ;;
 end
@@ -123,7 +123,7 @@ module Targets_cmd = struct
       match Path.Build.equal (Path.Build.parent_exn path) dir with
       | false -> None
       | true ->
-        (* directory targets can be distinguied by the trailing path seperator
+        (* directory targets can be distinguied by the trailing path separator
         *)
         Some
           (match kind with
@@ -134,7 +134,7 @@ module Targets_cmd = struct
   let term = ls_term fetch_results
 
   let command =
-    let doc = "Print targets in a given directory. Works similalry to ls." in
+    let doc = "Print targets in a given directory. Works similarly to ls." in
     Cmd.v (Cmd.info "targets" ~doc ~envs:Common.envs) term
   ;;
 end

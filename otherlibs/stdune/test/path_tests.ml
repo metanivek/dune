@@ -43,7 +43,7 @@ let%expect_test _ =
   let p = Path.(relative root) "foo" in
   descendant p ~of_:p;
   [%expect {|
-  Some In_source_tree "."
+  Some (In_source_tree ".")
   |}]
 ;;
 
@@ -149,21 +149,21 @@ false
 let%expect_test _ =
   descendant (r "foo") ~of_:(r "foo/");
   [%expect {|
-Some In_source_tree "."
+Some (In_source_tree ".")
 |}]
 ;;
 
 let%expect_test _ =
   descendant (r "foo/") ~of_:(r "foo");
   [%expect {|
-Some In_source_tree "."
+Some (In_source_tree ".")
 |}]
 ;;
 
 let%expect_test _ =
   descendant (r "foo/bar") ~of_:(r "foo");
   [%expect {|
-Some In_source_tree "bar"
+Some (In_source_tree "bar")
 |}]
 ;;
 
@@ -177,14 +177,14 @@ None
 let%expect_test _ =
   descendant Path.root ~of_:Path.root;
   [%expect {|
-Some In_source_tree "."
+Some (In_source_tree ".")
 |}]
 ;;
 
 let%expect_test _ =
   descendant (r "foo") ~of_:Path.root;
   [%expect {|
-Some In_source_tree "foo"
+Some (In_source_tree "foo")
 |}]
 ;;
 
@@ -205,21 +205,21 @@ None
 let%expect_test _ =
   descendant (Path.relative build_dir "foo/bar") ~of_:build_dir;
   [%expect {|
-Some In_source_tree "foo/bar"
+Some (In_source_tree "foo/bar")
 |}]
 ;;
 
 let%expect_test _ =
   descendant (Path.relative build_dir "foo/bar") ~of_:(Path.relative build_dir "foo");
   [%expect {|
-Some In_source_tree "bar"
+Some (In_source_tree "bar")
 |}]
 ;;
 
 let%expect_test _ =
   descendant (Path.relative build_dir "foo/bar") ~of_:(Path.relative build_dir "foo");
   [%expect {|
-Some In_source_tree "bar"
+Some (In_source_tree "bar")
 |}]
 ;;
 
@@ -276,6 +276,111 @@ let%expect_test _ =
   reach "bar/foo" ~from:"bar/baz/y";
   [%expect {|
 "../../foo"
+|}]
+;;
+
+let%expect_test _ =
+  reach "foo" ~from:"foo";
+  [%expect {|
+"."
+|}]
+;;
+
+let%expect_test _ =
+  reach "bar/foo" ~from:"bar/foo";
+  [%expect {|
+"."
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/b/x" ~from:"a/b/y";
+  [%expect {|
+"../x"
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/b" ~from:"a/b/x";
+  [%expect {|
+".."
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/b/x" ~from:"a/b";
+  [%expect {|
+"x"
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/b/x/z" ~from:"a/b/y";
+  [%expect {|
+"../x/z"
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/b/y" ~from:"a/b/x/z";
+  [%expect {|
+"../../y"
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/bbb" ~from:"a/b";
+  [%expect {|
+"../bbb"
+|}]
+;;
+
+let%expect_test _ =
+  reach "" ~from:"";
+  [%expect {|
+"."
+|}]
+;;
+
+let%expect_test _ =
+  reach "" ~from:"foo";
+  [%expect {|
+".."
+|}]
+;;
+
+let%expect_test _ =
+  reach "foo" ~from:"";
+  [%expect {|
+"foo"
+|}]
+;;
+
+let%expect_test _ =
+  reach "x/foo" ~from:"bar/x";
+  [%expect {|
+"../../x/foo"
+|}]
+;;
+
+let%expect_test _ =
+  reach "a/x" ~from:"x/b";
+  [%expect {|
+"../../a/x"
+|}]
+;;
+
+let%expect_test _ =
+  reach "default/META.foo" ~from:"default";
+  [%expect {|
+"META.foo"
+|}]
+;;
+
+let%expect_test _ =
+  reach "default/av" ~from:"default/avdevice";
+  [%expect {|
+"../av"
 |}]
 ;;
 
@@ -348,13 +453,13 @@ let%expect_test _ =
 [@@expect.uncaught_exn
   {|
   ( "(\"Path.rm_rf called on external dir\",\
-   \n{ t = External \"/does/not/exist/foo/bar/baz\" })") |}]
+   \n { t = External \"/does/not/exist/foo/bar/baz\" })") |}]
 ;;
 
 let%expect_test _ =
   drop_build_context (Path.relative Path.build_dir "foo/bar");
   [%expect {|
-Some In_source_tree "bar"
+Some (In_source_tree "bar")
 |}]
 ;;
 
@@ -469,28 +574,45 @@ let%expect_test "drop prefix" =
 ;;
 
 let%expect_test "drop external prefix" =
-  Path.External.drop_prefix
-    ~prefix:(Path.External.of_filename_relative_to_initial_cwd "foo/bar")
-    (Path.External.of_filename_relative_to_initial_cwd "foo/bar/baz")
+  Path.drop_prefix
+    ~prefix:(Path.of_filename_relative_to_initial_cwd "foo/bar")
+    (Path.of_filename_relative_to_initial_cwd "foo/bar/baz")
   |> Dyn.option Path.Local.to_dyn
   |> print_dyn;
   [%expect {| Some "baz" |}]
 ;;
 
-(* CR-someday alizter: This is a bug! Should return None *)
 let%expect_test "drop prefix as substring" =
   Path.drop_prefix ~prefix:(r "foo/bar") (r "foo/barbaz")
   |> Dyn.option Path.Local.to_dyn
   |> print_dyn;
-  [%expect {| Some "baz" |}]
+  [%expect {| None |}]
 ;;
 
-(* CR-someday alizter: This is a bug! Should return None *)
 let%expect_test "drop external prefix as substring" =
-  Path.External.drop_prefix
-    ~prefix:(Path.External.of_filename_relative_to_initial_cwd "foo/bar")
-    (Path.External.of_filename_relative_to_initial_cwd "foo/barbaz")
+  Path.drop_prefix
+    ~prefix:(Path.of_filename_relative_to_initial_cwd "foo/bar")
+    (Path.of_filename_relative_to_initial_cwd "foo/barbaz")
   |> Dyn.option Path.Local.to_dyn
   |> print_dyn;
-  [%expect {| Some "baz" |}]
+  [%expect {| None |}]
+;;
+
+let%expect_test "drop entire path" =
+  let path = r "foo/bar" in
+  Path.drop_prefix ~prefix:path path |> Dyn.option Path.Local.to_dyn |> print_dyn;
+  [%expect {| Some "." |}]
+;;
+
+let%expect_test "drop entire external path" =
+  let path = Path.of_filename_relative_to_initial_cwd "foo/bar" in
+  Path.drop_prefix ~prefix:path path |> Dyn.option Path.Local.to_dyn |> print_dyn;
+  [%expect {| Some "." |}]
+;;
+
+let%expect_test "drop prefix with a trailing /" =
+  Path.drop_prefix ~prefix:(Path.of_string "/a/b/c/") (Path.of_string "/a/b/c/d/e")
+  |> Dyn.option Path.Local.to_dyn
+  |> print_dyn;
+  [%expect {| Some "d/e" |}]
 ;;

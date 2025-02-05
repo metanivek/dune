@@ -1,4 +1,5 @@
 open Import
+open Memo.O
 
 module Group = struct
   type ocaml =
@@ -73,8 +74,7 @@ let eval ~loc ~expander ~paths:path_spec (deps : Dep_conf.t list) =
   let runtime_deps, sandbox = Dep_conf_eval.unnamed_get_paths ~expander deps in
   Option.iter sandbox ~f:(fun _ ->
     User_error.raise ~loc [ Pp.text "sandbox settings are not allowed" ]);
-  let open Memo.O in
-  let+ paths, _ = Action_builder.run runtime_deps Lazy in
+  let+ paths, _ = Action_builder.evaluate_and_collect_deps runtime_deps in
   (match path_spec with
    | Allow_all -> ()
    | Disallow_external lib_name ->

@@ -17,21 +17,16 @@ val all_init_deferred : unit -> unit Memo.t
 (** Find a super context by name. *)
 val find : Context_name.t -> t option Memo.t
 
+(** Find a super context by name. *)
+val find_exn : Context_name.t -> t Memo.t
+
 val to_dyn : t -> Dyn.t
 val context : t -> Context.t
 
 (** Context env with additional variables computed from packages *)
-val context_env : t -> Env.t
-
-(** Binaries that are symlinked in the associated .bin directory of [dir]. This
-    associated directory is [Path.relative dir ".bin"] *)
-val local_binaries : t -> dir:Path.Build.t -> File_binding.Expanded.t list Memo.t
+val context_env : t -> Env.t Memo.t
 
 val env_node : t -> dir:Path.Build.t -> Env_node.t Memo.t
-val bin_annot : t -> dir:Path.Build.t -> bool Memo.t
-
-(** Dump a directory environment in a readable form *)
-val dump_env : t -> dir:Path.Build.t -> Dune_lang.t list Action_builder.t
 
 val add_rule
   :  t
@@ -74,6 +69,17 @@ val add_alias_action
 val resolve_program
   :  t
   -> dir:Path.Build.t
+  -> ?where:Artifacts.where
+  -> ?hint:string
+  -> loc:Loc.t option
+  -> string
+  -> Action.Prog.t Action_builder.t
+
+(** try not to use this as it breaks rule loading laziness *)
+val resolve_program_memo
+  :  t
+  -> dir:Path.Build.t
+  -> ?where:Artifacts.where
   -> ?hint:string
   -> loc:Loc.t option
   -> string
@@ -83,5 +89,5 @@ val expander : t -> dir:Path.Build.t -> Expander.t Memo.t
 
 module As_memo_key : sig
   include Memo.Input with type t = t
-  module And_package : Memo.Input with type t = t * Package.t
+  module And_package_name : Memo.Input with type t = t * Package.Name.t
 end

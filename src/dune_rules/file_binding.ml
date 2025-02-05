@@ -33,6 +33,13 @@ let relative_path_starts_with_parent relative_path =
   | Some (first, _) -> String.equal first Filename.parent_dir_name
 ;;
 
+let escaping_paths_in_install_stanza =
+  Warning.make
+    ~default:(fun version -> if version >= (3, 11) then `Enabled else `Disabled)
+    ~name:"escaping_paths_in_install_stanza"
+    ~since:(3, 11)
+;;
+
 let validate_dst_for_install_stanza
   ~relative_dst_path_starts_with_parent_error_when
   ~loc
@@ -45,21 +52,21 @@ let validate_dst_for_install_stanza
     (match relative_dst_path_starts_with_parent_error_when with
      | `Deprecation_warning_from_3_11 ->
        Warning_emit.emit
-         Warning.escaping_paths_in_install_stanza
+         escaping_paths_in_install_stanza
          (Warning_emit.Context.source_dir_or_enable dir)
          (fun () ->
-           User_message.make
-             ~loc
-             [ Pp.textf
-                 "The destination path %s begins with %s which will become an error in a \
-                  future version of Dune. Destinations of files in install stanzas \
-                  beginning with %s will be disallowed to prevent a package's installed \
-                  files from escaping that package's install directories."
-                 (String.maybe_quoted dst)
-                 (String.maybe_quoted Filename.parent_dir_name)
-                 (String.maybe_quoted Filename.parent_dir_name)
-             ]
-           |> Memo.return)
+            User_message.make
+              ~loc
+              [ Pp.textf
+                  "The destination path %s begins with %s which will become an error in \
+                   a future version of Dune. Destinations of files in install stanzas \
+                   beginning with %s will be disallowed to prevent a package's installed \
+                   files from escaping that package's install directories."
+                  (String.maybe_quoted dst)
+                  (String.maybe_quoted Filename.parent_dir_name)
+                  (String.maybe_quoted Filename.parent_dir_name)
+              ]
+            |> Memo.return)
      | `Always_error ->
        User_error.raise
          ~loc
@@ -108,6 +115,7 @@ end
 module Unexpanded = struct
   type nonrec t = (String_with_vars.t, String_with_vars.t) t
 
+  let loc t = String_with_vars.loc t.src
   let to_dyn = to_dyn String_with_vars.to_dyn String_with_vars.to_dyn
   let equal = equal String_with_vars.equal_no_loc String_with_vars.equal_no_loc
 

@@ -61,7 +61,7 @@ type t =
   ; version : Syntax.Version.t
   }
 
-type Stanza.t += T of t
+include Stanza.S with type t := t
 
 val decode : t Dune_lang.Decoder.t
 val syntax : Dune_lang.Syntax.t
@@ -73,3 +73,4 @@ val c_generated_types_module : t -> Module_name.t
 val type_gen_script : t -> string
 val c_generated_functions_cout_c : t -> Function_description.t -> string
 val function_gen_script : t -> Function_description.t -> string
+val has_stubs : t option -> bool

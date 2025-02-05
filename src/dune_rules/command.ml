@@ -28,11 +28,14 @@ module Args0 = struct
   let dyn args = Dyn (Action_builder.map args ~f:(fun x -> As x))
   let empty = S []
 
-  let rec as_any : without_targets t -> any t = function
+  let as_any : without_targets t -> any t = function
     | A _ as x -> (x :> any t)
     | As _ as x -> (x :> any t)
-    | S l -> S (List.map l ~f:as_any)
-    | Concat (sep, l) -> Concat (sep, List.map l ~f:as_any)
+    (* We can't convince the type checker to do a cast, so we force it.
+       See the discussion in https://github.com/ocaml/dune/pull/10278 to see why
+       the pattern match is optimized away. *)
+    | S _ as x -> Obj.magic x
+    | Concat _ as x -> Obj.magic x
     | Dep _ as x -> (x :> any t)
     | Deps _ as x -> (x :> any t)
     | Path _ as x -> (x :> any t)
@@ -93,11 +96,17 @@ let dep_prog = function
   | Error _ -> Action_builder.return ()
 ;;
 
-let run ~dir ?sandbox ?stdout_to prog args =
+let run_dyn_prog ~dir ?sandbox ?stdout_to prog args =
   Action_builder.With_targets.add
     ~file_targets:(Option.to_list stdout_to)
     (let open Action_builder.With_targets.O in
-     let+ () = Action_builder.with_no_targets (dep_prog prog)
+     let+ prog =
+       Action_builder.with_no_targets
+       @@
+       let open Action_builder.O in
+       let* prog = prog in
+       let+ () = dep_prog prog in
+       prog
      and+ args = expand ~dir (S args) in
      let action = Action.run prog args in
      let action =
@@ -106,6 +115,10 @@ let run ~dir ?sandbox ?stdout_to prog args =
        | Some path -> Action.with_stdout_to path action
      in
      Action.Full.make ?sandbox (Action.chdir dir action))
+;;
+
+let run ~dir ?sandbox ?stdout_to prog args =
+  run_dyn_prog ~dir ?sandbox ?stdout_to (Action_builder.return prog) args
 ;;
 
 let run' ~dir prog args =

@@ -83,14 +83,17 @@ let explain_results_to_user results ~transitive ~lock_dir_path =
 
 let better_candidate
   ~repos
-  ~(local_packages : Opam_repo.With_file.t Package_name.Map.t)
+  ~(local_packages : Dune_pkg.Local_package.t Package_name.Map.t)
   (pkg : Lock_dir.Pkg.t)
   =
   let open Fiber.O in
   let pkg_name = pkg.info.name |> Package_name.to_string |> OpamPackage.Name.of_string in
   let is_immediate_dep_of_local_package =
-    Package_name.Map.exists local_packages ~f:(fun { Opam_repo.With_file.opam_file; _ } ->
-      OpamFile.OPAM.depends opam_file
+    Package_name.Map.exists local_packages ~f:(fun local_package ->
+      Dune_pkg.Local_package.(
+        for_solver local_package
+        |> (fun x -> x.dependencies)
+        |> Dune_pkg.Dependency_formula.to_filtered_formula)
       |> OpamFilter.filter_deps
            ~build:true
            ~post:false
@@ -104,7 +107,7 @@ let better_candidate
   let+ all_versions =
     Opam_repo.load_all_versions repos pkg_name
     >>| OpamPackage.Version.Map.values
-    >>| List.map ~f:(fun (_repo, (file : Opam_repo.With_file.t)) -> file.opam_file)
+    >>| List.map ~f:Resolved_package.opam_file
   in
   match
     List.max all_versions ~f:(fun x y ->
@@ -115,7 +118,7 @@ let better_candidate
   | Some newest_opam_file ->
     let version = OpamFile.OPAM.version newest_opam_file in
     (match
-       Package_version.to_opam pkg.info.version
+       Package_version.to_opam_package_version pkg.info.version
        |> OpamPackage.Version.compare version
        |> Ordering.of_int
      with
@@ -124,7 +127,7 @@ let better_candidate
        Better_candidate
          { is_immediate_dep_of_local_package
          ; name = pkg.info.name
-         ; newer_version = version |> Package_version.of_opam
+         ; newer_version = version |> Package_version.of_opam_package_version
          ; outdated_version = pkg.info.version
          })
 ;;

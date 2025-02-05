@@ -21,7 +21,11 @@ module Paths = struct
     Path.Build.relative dir ("." ^ name ^ ".eobjs")
   ;;
 
-  let melange_object_directory ~dir name = Path.Build.relative dir ("." ^ name ^ ".mobjs")
+  let melange_object_directory ~dir name =
+    (* Use "mobjs" rather than "objs" to avoid a potential conflict with a
+       library / executable of the same name *)
+    Path.Build.relative dir ("." ^ name ^ ".mobjs")
+  ;;
 end
 
 module External = struct
@@ -452,7 +456,8 @@ let as_local_exn (t : Path.t t) =
   match t with
   | Local _ -> assert false
   | Local_as_path e -> Local e
-  | External _ -> Code_error.raise "Obj_dir.as_local_exn: external dir" []
+  | External e ->
+    Code_error.raise "Obj_dir.as_local_exn: external dir" [ "t", External.to_dyn e ]
 ;;
 
 let make_exe ~dir ~name = Local (Local.make_exe ~dir ~name)

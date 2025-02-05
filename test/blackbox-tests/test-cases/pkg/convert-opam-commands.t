@@ -85,7 +85,7 @@ Package which has boolean where string was expected. This should be caught while
   > ]
   > EOF
 
-  $ solve_translate_opam_filters standard-dune with-interpolation with-percent-sign variable-types
+  $ solve standard-dune with-interpolation with-percent-sign variable-types
   Solution for dune.lock:
   - standard-dune.0.0.1
   - variable-types.0.0.1
@@ -103,16 +103,7 @@ Package which has boolean where string was expected. This should be caught while
     (when
      %{pkg-self:dev}
      (run dune subst))
-    (run
-     dune
-     build
-     -p
-     %{pkg-self:name}
-     -j
-     %{jobs}
-     @install
-     (when %{pkg-self:with-test} @runtest)
-     (when %{pkg-self:with-doc} @doc))))
+    (run dune build -p %{pkg-self:name} -j %{jobs} @install)))
 
   $ cat dune.lock/with-interpolation.pkg
   (version 0.0.1)
@@ -141,7 +132,7 @@ Package which has boolean where string was expected. This should be caught while
     (run echo %{pkg:foo:package_var})
     (run echo %{os_family})))
 
-  $ solve_translate_opam_filters with-malformed-interpolation
+  $ solve with-malformed-interpolation
   File "$TESTCASE_ROOT/mock-opam-repository/packages/with-malformed-interpolation/with-malformed-interpolation.0.0.1/opam", line 1, characters 0-0:
   Error: Encountered malformed variable interpolation while processing commands
   for package with-malformed-interpolation.0.0.1.
@@ -149,7 +140,7 @@ Package which has boolean where string was expected. This should be caught while
   %{prefix
   [1]
 
-  $ solve_translate_opam_filters exercise-filters
+  $ solve exercise-filters
   Solution for dune.lock:
   - exercise-filters.0.0.1
 
@@ -165,9 +156,7 @@ Package which has boolean where string was expected. This should be caught while
      (and_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
      (run echo b))
     (when
-     (and_absorb_undefined_var
-      (and_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
-      %{pkg-self:baz})
+     (and_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar} %{pkg-self:baz})
      (run echo c))
     (when
      (or_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
@@ -188,17 +177,8 @@ Package which has boolean where string was expected. This should be caught while
     (when
      (< %{pkg-self:version} 1.0)
      (run echo g))
-    (when
-     (and_absorb_undefined_var
-      %{pkg-self:with-test}
-      (< %{pkg:ocaml:version} 5.0.0))
-     (run echo h))
-    (when
-     true
-     (run echo i))
-    (when
-     (not false)
-     (run echo j))
+    (run echo i)
+    (run echo j)
     (when
      %{pkg:foo:installed}
      (run echo k))
@@ -207,15 +187,7 @@ Package which has boolean where string was expected. This should be caught while
      (run echo l))
     (when
      (and %{pkg:foo:installed} %{pkg:bar:installed} %{pkg:baz:installed})
-     (run echo m))
-    (when
-     (not
-      (has_undefined_var %{pkg-self:madeup}))
-     (run echo n))
-    (when
-     (not
-      (has_undefined_var %{pkg-self:installed}))
-     (run echo o))))
+     (run echo m))))
 
 Test that if opam filter translation is disabled the output doesn't contain any translated filters:
   $ solve exercise-filters
@@ -226,24 +198,47 @@ Test that if opam filter translation is disabled the output doesn't contain any 
   
   (build
    (progn
-    (run echo a)
-    (run echo b)
-    (run echo c)
-    (run echo d)
-    (run echo e)
-    (run echo f)
-    (run echo b)
-    (run echo g)
-    (run echo h)
+    (when
+     %{pkg-self:foo}
+     (run echo a))
+    (when
+     (and_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
+     (run echo b))
+    (when
+     (and_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar} %{pkg-self:baz})
+     (run echo c))
+    (when
+     (or_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
+     (run echo d))
+    (when
+     (or_absorb_undefined_var
+      %{pkg-self:foo}
+      (and_absorb_undefined_var %{pkg-self:bar} %{pkg-self:baz}))
+     (run echo e))
+    (when
+     (and_absorb_undefined_var
+      (or_absorb_undefined_var %{pkg-self:foo} %{pkg-self:bar})
+      %{pkg-self:baz})
+     (run echo f))
+    (when
+     (= %{pkg-self:foo} %{pkg-self:bar})
+     (run echo b))
+    (when
+     (< %{pkg-self:version} 1.0)
+     (run echo g))
     (run echo i)
     (run echo j)
-    (run echo k)
-    (run echo l)
-    (run echo m)
-    (run echo n)
-    (run echo o)))
+    (when
+     %{pkg:foo:installed}
+     (run echo k))
+    (when
+     (< %{pkg:foo:version} 0.4)
+     (run echo l))
+    (when
+     (and %{pkg:foo:installed} %{pkg:bar:installed} %{pkg:baz:installed})
+     (run echo m))))
 
-  $ solve_translate_opam_filters exercise-term-filters
+  $ solve exercise-term-filters
   Solution for dune.lock:
   - exercise-term-filters.0.0.1
   $ cat dune.lock/exercise-term-filters.pkg
@@ -258,9 +253,11 @@ Test that if opam filter translation is disabled the output doesn't contain any 
      (and_absorb_undefined_var %{pkg-self:bar} %{pkg-self:baz})
      c)))
 
-  $ solve_translate_opam_filters filter-error-bool-where-string-expected
-  Error: At
-  $TESTCASE_ROOT/mock-opam-repository/packages/filter-error-bool-where-string-expected/filter-error-bool-where-string-expected.0.0.1/opam:3:33-3:34::
+  $ solve filter-error-bool-where-string-expected
+  File "$TESTCASE_ROOT/mock-opam-repository/packages/filter-error-bool-where-string-expected/filter-error-bool-where-string-expected.0.0.1/opam", line 3, characters 33-34:
+  3 |   [ "echo" "a" ] { foo:version < (foo = bar) }
+                                       ^
+  Error: unable to parse opam file
   Parse error
   [1]
 
@@ -281,13 +278,13 @@ Package with package conjunction and string selections inside variable interpola
   > ]
   > EOF
 
-  $ solve_project_translate_opam_filters <<EOF
+  $ solve_project <<EOF
   > (lang dune 3.8)
   > (package (name x) (depends package-conjunction-and-string-selection))
   > EOF
   Solution for dune.lock:
   - package-conjunction-and-string-selection.0.0.1
-Note that "enable" is not a true opam variable. Opam desugars occurances of
+Note that "enable" is not a true opam variable. Opam desugars occurrences of
 "pkg:enable" into "pkg:enable?enable:disable" but if the explicit package scope
 is omitted then it's treated like a regular variable. That explains why the
 opam syntax `"--%{enable}%-feature"` is converted to

@@ -18,7 +18,7 @@ let man =
 let info = Cmd.info "top" ~doc ~man
 
 let term =
-  let+ builder = Common.Builder.term
+  let+ default_builder = Common.Builder.term
   and+ context =
     let doc = "Run the Coq toplevel in this build context." in
     Common.context_arg ~doc
@@ -34,7 +34,12 @@ let term =
       & flag
       & info [ "no-build" ] ~doc:"Don't rebuild dependencies before executing.")
   in
-  let common, config = Common.init builder in
+  let common, config =
+    let builder =
+      if no_rebuild then Common.Builder.forbid_builds default_builder else default_builder
+    in
+    Common.init builder
+  in
   let coq_file_arg = Common.prefix_target common coq_file_arg |> Path.Local.of_string in
   let coqtop, argv, env =
     Scheduler.go ~common ~config
@@ -53,8 +58,8 @@ let term =
        | Some dir -> dir)
       |> Path.Build.append_local (Context.build_dir context)
     in
-    let* coqtop, args =
-      Build_system.run_exn
+    let* coqtop, args, env =
+      build_exn
       @@ fun () ->
       let open Memo.O in
       let* (tr : Dune_rules.Dir_contents.triage) =
@@ -69,7 +74,7 @@ let term =
       let* coq_src = Dune_rules.Dir_contents.coq dc in
       let coq_module =
         let source = coq_file_build in
-        match Dune_rules.Coq_sources.find_module ~source coq_src with
+        match Dune_rules.Coq.Coq_sources.find_module ~source coq_src with
         | Some m -> snd m
         | None ->
           let hints =
@@ -81,7 +86,7 @@ let term =
             ~hints
             [ Pp.textf "Cannot find file: %s" (coq_file_arg |> Path.Local.to_string) ]
       in
-      let stanza = Dune_rules.Coq_sources.lookup_module coq_src coq_module in
+      let stanza = Dune_rules.Coq.Coq_sources.lookup_module coq_src coq_module in
       let args, use_stdlib, coq_lang_version, wrapper_name, mode =
         match stanza with
         | None ->
@@ -91,7 +96,7 @@ let term =
                 (coq_file_arg |> Path.Local.to_string)
             ]
         | Some (`Theory theory) ->
-          ( Dune_rules.Coq_rules.coqtop_args_theory
+          ( Dune_rules.Coq.Coq_rules.coqtop_args_theory
               ~sctx
               ~dir
               ~dir_contents:dc
@@ -99,10 +104,10 @@ let term =
               coq_module
           , theory.buildable.use_stdlib
           , theory.buildable.coq_lang_version
-          , Dune_rules.Coq_lib_name.wrapper (snd theory.name)
+          , Dune_rules.Coq.Coq_lib_name.wrapper (snd theory.name)
           , theory.buildable.mode )
         | Some (`Extraction extr) ->
-          ( Dune_rules.Coq_rules.coqtop_args_extraction ~sctx ~dir extr coq_module
+          ( Dune_rules.Coq.Coq_rules.coqtop_args_extraction ~sctx ~dir extr coq_module
           , extr.buildable.use_stdlib
           , extr.buildable.coq_lang_version
           , "DuneExtraction"
@@ -116,10 +121,10 @@ let term =
           else (
             let mode =
               match mode with
-              | None -> Dune_rules.Coq_mode.VoOnly
+              | None -> Dune_rules.Coq.Coq_mode.VoOnly
               | Some mode -> mode
             in
-            Dune_rules.Coq_rules.deps_of
+            Dune_rules.Coq.Coq_rules.deps_of
               ~dir
               ~use_stdlib
               ~wrapper_name
@@ -127,28 +132,28 @@ let term =
               ~coq_lang_version
               coq_module)
         in
-        Action_builder.(run deps_of) Eager
+        Action_builder.evaluate_and_collect_facts deps_of
       in
       (* Get args *)
       let* (args, _) : string list * Dep.Fact.t Dep.Map.t =
         let* args = args in
         let dir = Path.external_ Path.External.initial_cwd in
         let args = Dune_rules.Command.expand ~dir (S args) in
-        Action_builder.run args.build Eager
+        Action_builder.evaluate_and_collect_facts args.build
       in
-      let* prog = Super_context.resolve_program sctx ~dir ~loc:None coqtop in
+      let* prog = Super_context.resolve_program_memo sctx ~dir ~loc:None coqtop in
       let prog = Action.Prog.ok_exn prog in
-      let+ () = Build_system.build_file prog in
-      Path.to_string prog, args
+      let* () = Build_system.build_file prog in
+      let+ env = Super_context.context_env sctx in
+      Path.to_string prog, args, env
     in
     let argv =
       let topfile = Path.to_absolute_filename (Path.build coq_file_build) in
       (coqtop :: "-topfile" :: topfile :: args) @ extra_args
     in
-    let env = Super_context.context_env sctx in
     Fiber.return (coqtop, argv, env)
   in
-  restore_cwd_and_execve common coqtop argv env
+  restore_cwd_and_execve (Common.root common) coqtop argv env
 ;;
 
 let command = Cmd.v info term

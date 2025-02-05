@@ -1,3 +1,27 @@
+module Array = Stdlib.Array
+
+include struct
+  exception Found of int
+
+  [@@@ocaml.warning "-32"]
+
+  let find_opt ~f t =
+    try
+      for i = 0 to Array.length t do
+        if f t.(i) then raise_notrace (Found i)
+      done;
+      None
+    with
+    | Found i -> Some t.(i)
+  ;;
+end
+
+let swap arr i j =
+  let first, second = arr.(i), arr.(j) in
+  arr.(i) <- second;
+  arr.(j) <- first
+;;
+
 module T = struct
   include ArrayLabels
 
@@ -24,8 +48,32 @@ end
 
 include T
 
+let to_list_map =
+  let rec loop arr i f acc =
+    if i < 0
+    then acc
+    else (
+      let acc = f (get arr i) :: acc in
+      loop arr (i - 1) f acc)
+  in
+  fun arr ~f -> loop arr (length arr - 1) f []
+;;
+
+let of_list_map l ~f =
+  let len = List.length l in
+  let l = ref l in
+  init len ~f:(fun _ ->
+    match !l with
+    | [] -> assert false
+    | x :: xs ->
+      l := xs;
+      f x)
+;;
+
 module Immutable = struct
   include T
 
   let of_array a = copy a
+  let to_list_map t ~f = to_list_map t ~f
+  let of_list_map t ~f = of_list_map t ~f
 end

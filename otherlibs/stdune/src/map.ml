@@ -44,6 +44,12 @@ module Make (Key : Key) : S with type key = Key.t = struct
   let merge a b ~f = merge a b ~f
   let union a b ~f = union a b ~f
 
+  let union_all maps ~f =
+    match maps with
+    | [] -> empty
+    | init :: maps -> List.fold_left maps ~init ~f:(fun acc map -> union acc map ~f)
+  ;;
+
   let union_exn a b =
     union a b ~f:(fun key _ _ ->
       Code_error.raise
@@ -64,7 +70,7 @@ module Make (Key : Key) : S with type key = Key.t = struct
       (merge a b ~f:(fun key a b ->
          f key a b;
          None)
-        : _ t)
+       : _ t)
   ;;
 
   let foldi t ~init ~f = fold t ~init ~f:(fun ~key ~data acc -> f key data acc)
@@ -77,6 +83,14 @@ module Make (Key : Key) : S with type key = Key.t = struct
   let filter t ~f = filteri t ~f:(fun _ x -> f x)
   let partitioni t ~f = partition t ~f
   let partition t ~f = partitioni t ~f:(fun _ x -> f x)
+
+  let partition_map t ~f =
+    foldi t ~init:(empty, empty) ~f:(fun i x (l, r) ->
+      match f x with
+      | Either.Left e -> set l i e, r
+      | Right e -> l, set r i e)
+  ;;
+
   let to_list = bindings
   let to_list_map t ~f = foldi t ~init:[] ~f:(fun k v acc -> f k v :: acc) |> List.rev
 
@@ -274,6 +288,6 @@ module Make (Key : Key) : S with type key = Key.t = struct
         t'
     ;;
 
-    let to_dyn a_to_dyn t = to_dyn (fun l -> Dyn.List (List.map ~f:a_to_dyn l)) t
+    let to_dyn a_to_dyn t = to_dyn (Dyn.list a_to_dyn) t
   end
 end

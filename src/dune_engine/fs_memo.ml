@@ -224,7 +224,7 @@ end
 let path_stat path =
   let* () = Watcher.watch ~try_to_watch_via_parent:true path in
   match Fs_cache.read Fs_cache.Untracked.path_stat path with
-  | Ok { st_dev = _; st_ino = _; st_kind } as result when st_kind = S_DIR ->
+  | Ok { st_dev = _; st_ino = _; st_kind = S_DIR } as result ->
     (* If [path] is a directory, we conservatively watch it directly too,
        because its stats may change in a way that doesn't trigger an event in
        the parent. We probably don't care about such changes for now because
@@ -296,10 +296,40 @@ let dir_exists path =
 let file_digest ?(force_update = false) path =
   if force_update
   then (
-    Cached_digest.Untracked.invalidate_cached_timestamp (Path.outside_build_dir path);
+    Cached_digest.Untracked.invalidate_cached_timestamp path;
     Fs_cache.evict Fs_cache.Untracked.file_digest path);
   let+ () = Watcher.watch ~try_to_watch_via_parent:true path in
   Fs_cache.read Fs_cache.Untracked.file_digest path
+;;
+
+let file_digest_exn ?loc path =
+  let report_user_error details =
+    let+ loc =
+      match loc with
+      | None -> Memo.return None
+      | Some loc -> loc ()
+    in
+    User_error.raise
+      ?loc
+      ([ Pp.textf
+           "File unavailable: %s"
+           (Path.Outside_build_dir.to_string_maybe_quoted path)
+       ]
+       @ details)
+  in
+  file_digest path
+  >>= function
+  | Ok digest -> Memo.return digest
+  | Error No_such_file -> report_user_error []
+  | Error Broken_symlink -> report_user_error [ Pp.text "Broken symbolic link" ]
+  | Error Cyclic_symlink -> report_user_error [ Pp.text "Cyclic symbolic link" ]
+  | Error (Unexpected_kind st_kind) ->
+    report_user_error
+      [ Pp.textf "This is not a regular file (%s)" (File_kind.to_string st_kind) ]
+  | Error (Unix_error unix_error) ->
+    report_user_error [ Unix_error.Detailed.pp ~prefix:"Reason: " unix_error ]
+  | Error (Unrecognized exn) ->
+    report_user_error [ Pp.textf "%s" (Printexc.to_string exn) ]
 ;;
 
 let dir_contents ?(force_update = false) path =

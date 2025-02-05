@@ -6,6 +6,8 @@ module type T = sig
   type t
 end
 
+include Action_intf.Exec
+
 module Make
     (Program : T)
     (Path : T)
@@ -13,11 +15,11 @@ module Make
     (String : T)
     (Extension : T)
     (Ast : Action_intf.Ast
-             with type program := Program.t
-             with type path := Path.t
-             with type target := Target.t
-             with type string := String.t
-              and type ext := Extension.t) =
+           with type program := Program.t
+           with type path := Path.t
+           with type target := Target.t
+           with type string := String.t
+            and type ext := Extension.t) =
 struct
   include Ast
 
@@ -47,16 +49,11 @@ struct
   let cat ps = Cat ps
   let copy a b = Copy (a, b)
   let symlink a b = Symlink (a, b)
-  let system s = System s
   let bash s = Bash s
   let write_file ?(perm = File_perm.Normal) p s = Write_file (p, perm, s)
   let rename a b = Rename (a, b)
   let remove_tree path = Remove_tree path
   let mkdir path = Mkdir path
-
-  let diff ?(optional = false) ?(mode = Diff.Mode.Text) file1 file2 =
-    Diff { optional; file1; file2; mode }
-  ;;
 end
 
 module Prog = struct
@@ -70,18 +67,9 @@ module Prog = struct
 
     let create ?hint ~context ~program ~loc () = { hint; context; program; loc }
 
-    let user_message { context; program; hint; loc } =
-      let hint =
-        match program with
-        | "refmt" -> Some (Option.value ~default:"opam install reason" hint)
-        | "rescript_syntax" ->
-          Some (Option.value ~default:"opam install rescript-syntax" hint)
-        | _ -> hint
-      in
-      Utils.program_not_found_message ?hint ~loc ~context program
+    let raise { context; program; hint; loc } =
+      raise (User_error.E (Utils.program_not_found_message ?hint ~loc ~context program))
     ;;
-
-    let raise t = raise (User_error.E (user_message t))
 
     let to_dyn { context; program; hint; loc = _ } =
       let open Dyn in
@@ -112,11 +100,11 @@ end
 
 module type Ast =
   Action_intf.Ast
-    with type program = Prog.t
-    with type path = Path.t
-    with type target = Path.Build.t
-    with type string = String.t
-     and type ext = Encode_ext.t
+  with type program = Prog.t
+  with type path = Path.t
+  with type target = Path.Build.t
+  with type string = String.t
+   and type ext = Encode_ext.t
 
 module rec Ast : Ast = Ast
 include Make (Prog) (Stdune.Path) (Stdune.Path.Build) (String) (Encode_ext) (Ast)
@@ -139,14 +127,14 @@ type string = String.t
 module For_shell = struct
   module type Ast =
     Action_intf.Ast
-      with type program = string
-      with type path = string
-      with type target = string
-      with type string = string
-      with type ext = Dune_sexp.t
+    with type program = string
+    with type path = string
+    with type target = string
+    with type string = string
+    with type ext = Sexp.t
 
   module rec Ast : Ast = Ast
-  include Make (String) (String) (String) (String) (Dune_sexp) (Ast)
+  include Make (String) (String) (String) (String) (Sexp) (Ast)
 end
 
 module Relativise = Action_mapper.Make (Ast) (For_shell.Ast)
@@ -176,8 +164,8 @@ let for_shell t =
     ~f_ext:(fun ~dir (module A) ->
       A.Spec.encode
         A.v
-        (fun p -> Dune_sexp.atom_or_quoted_string (f_path p ~dir))
-        (fun p -> Dune_sexp.atom_or_quoted_string (f_target p ~dir)))
+        (fun p -> Sexp.Atom (f_path p ~dir))
+        (fun p -> Sexp.Atom (f_target p ~dir)))
     ~f_program:(fun ~dir x ->
       match x with
       | Ok p -> Path.reach p ~from:dir
@@ -200,14 +188,11 @@ let fold_one_step t ~init:acc ~f =
   | Copy _
   | Symlink _
   | Hardlink _
-  | System _
   | Bash _
   | Write_file _
   | Rename _
   | Remove_tree _
   | Mkdir _
-  | Diff _
-  | Merge_files_into _
   | Extension _ -> acc
 ;;
 
@@ -243,7 +228,6 @@ let rec is_dynamic = function
   | With_accepted_exit_codes (_, t) -> is_dynamic t
   | Progn l | Pipe (_, l) | Concurrent l -> List.exists l ~f:is_dynamic
   | Run _
-  | System _
   | Bash _
   | Echo _
   | Cat _
@@ -253,9 +237,7 @@ let rec is_dynamic = function
   | Write_file _
   | Rename _
   | Remove_tree _
-  | Diff _
   | Mkdir _
-  | Merge_files_into _
   | Extension _ -> false
 ;;
 
@@ -304,12 +286,9 @@ let is_useful_to memoize =
     | Write_file _ -> true
     | Rename _ -> memoize
     | Remove_tree _ -> false
-    | Diff _ -> true
     | Mkdir _ -> false
-    | Merge_files_into _ -> true
     | Run _ -> true
     | Dynamic_run _ -> true
-    | System _ -> true
     | Bash _ -> true
     | Extension (module A) -> A.Spec.is_useful_to ~memoize
   in
@@ -357,7 +336,7 @@ module Full = struct
   let make
     ?(env = Env.empty)
     ?(locks = [])
-    ?(can_go_in_shared_cache = true)
+    ?(can_go_in_shared_cache = !Clflags.can_go_in_shared_cache_default)
     ?(sandbox = Sandbox_config.default)
     action
     =

@@ -14,14 +14,14 @@ module Emit : sig
     ; preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
     ; runtime_deps : Loc.t * Dep_conf.t list
     ; preprocessor_deps : Dep_conf.t list
+    ; lint : Preprocess.Without_instrumentation.t Preprocess.Per_module.t
     ; promote : Rule.Promote.t option
     ; compile_flags : Ordered_set_lang.Unexpanded.t
     ; allow_overlapping_dependencies : bool
     ; enabled_if : Blang.t
-    ; dune_version : Dune_lang.Syntax.Version.t
     }
 
-  type Stanza.t += T of t
+  include Stanza.S with type t := t
 
   val implicit_alias : Alias.Name.t
   val decode : t Dune_lang.Decoder.t

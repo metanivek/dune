@@ -5,7 +5,6 @@ open Memo.O
 module Rule = struct
   type t =
     { id : Rule.Id.t
-    ; dir : Path.Build.t
     ; deps : Dep.Set.t
     ; expanded_deps : Path.Set.t
     ; targets : Targets.Validated.t
@@ -30,9 +29,8 @@ end = struct
             >>= Memo.parallel_map ~f:(fun (loc, definition) ->
               Memo.push_stack_frame
                 (fun () ->
-                  Action_builder.run
+                  Action_builder.evaluate_and_collect_deps
                     (Build_system.dep_on_alias_definition definition)
-                    Lazy
                   >>| snd)
                 ~human_readable_description:(fun () -> Alias.describe alias ~loc))
           in
@@ -46,7 +44,11 @@ end = struct
     Memo.parallel_map (Dep.Set.to_list deps) ~f:(fun (dep : Dep.t) ->
       match dep with
       | File p -> Memo.return (Path.Set.singleton p)
-      | File_selector g -> Build_system.eval_pred g
+      | File_selector g ->
+        let+ filenames = Build_system.eval_pred g in
+        (* Alas, we can't use filename sets here because we end up putting paths coming
+           from different directories together. *)
+        Path.Set.of_list (Filename_set.to_list filenames)
       | Alias a -> Expand.alias a
       | Env _ | Universe -> Memo.return Path.Set.empty)
     >>| Path.Set.union_all
@@ -59,11 +61,10 @@ let evaluate_rule =
       "evaluate-rule"
       ~input:(module Non_evaluated_rule)
       (fun rule ->
-        let* action, deps = Action_builder.run rule.action Lazy in
+        let* action, deps = Action_builder.evaluate_and_collect_deps rule.action in
         let* expanded_deps = Expand.deps deps in
         Memo.return
           { Rule.id = rule.id
-          ; dir = rule.dir
           ; deps
           ; expanded_deps
           ; targets = rule.targets
@@ -84,7 +85,7 @@ let eval ~recursive ~request =
       | Some rule -> evaluate_rule rule >>| Option.some)
     >>| List.filter_opt
   in
-  let* (), deps = Action_builder.run request Lazy in
+  let* (), deps = Action_builder.evaluate_and_collect_deps request in
   let* root_rules = rules_of_deps deps in
   Rule_top_closure.top_closure
     root_rules

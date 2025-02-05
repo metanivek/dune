@@ -8,6 +8,7 @@
   (<> %{profile} dune-bootstrap))
  (libraries
   memo
+  promote
   ocaml
   ocaml_config
   dune_lang
@@ -27,6 +28,7 @@
   dune_rules
   dune_vcs
   dune_engine
+  dune_targets
   dune_util
   dune_upgrader
   dune_pkg

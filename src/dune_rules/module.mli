@@ -7,6 +7,7 @@ module File : sig
 
   val dialect : t -> Dialect.t
   val path : t -> Path.t
+  val original_path : t -> Path.t
   val make : Dialect.t -> Path.t -> t
 end
 
@@ -21,6 +22,8 @@ module Kind : sig
     | Root
 
   include Dune_lang.Conv.S with type t := t
+
+  val to_dyn : t -> Dyn.t
 end
 
 module Source : sig
@@ -59,7 +62,6 @@ val set_obj_name : t -> Module_name.Unique.t -> t
 val set_path : t -> Module_name.Path.t -> t
 val add_file : t -> Ml_kind.t -> File.t -> t
 val set_source : t -> Ml_kind.t -> File.t option -> t
-val map_files : t -> f:(Ml_kind.t -> File.t -> File.t) -> t
 
 (** Set preprocessing flags *)
 val set_pp : t -> (string list Action_builder.t * Sandbox_config.t) option -> t
@@ -86,11 +88,12 @@ module Obj_map : sig
 end
 
 val sources : t -> Path.t list
+val sources_without_pp : t -> Path.t list
 val visibility : t -> Visibility.t
 val encode : t -> src_dir:Path.t -> Dune_lang.t list
 val decode : src_dir:Path.t -> t Dune_lang.Decoder.t
 
-(** [pped m] return [m] but with the preprocessed source paths paths *)
+(** [pped m] return [m] but with the preprocessed source paths *)
 val pped : t -> t
 
 (** [ml_source m] returns [m] but with the OCaml syntax source paths *)

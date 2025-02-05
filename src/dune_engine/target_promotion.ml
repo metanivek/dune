@@ -109,19 +109,12 @@ let promote_target_if_not_up_to_date
    file promotions. Another approach is to make restarts really cheap, so that
    we don't care any more, for example, by introducing reverse dependencies in
    Memo (and/or by having smarter cancellations). *)
-let promote
-  ~dir
-  ~(targets : _ Targets.Produced.t)
-  ~(promote : Rule.Promote.t)
-  ~promote_source
-  =
+let promote ~(targets : _ Targets.Produced.t) ~(promote : Rule.Promote.t) ~promote_source =
   (* Select targets taking into account the (promote (only <glob>)) field. *)
-  let selected_for_promotion : Path.Build.t -> bool =
+  let selected_for_promotion : Path.Local.t -> bool =
     match promote.only with
-    | None -> fun (_ : Path.Build.t) -> true
-    | Some pred ->
-      fun target ->
-        Predicate.test pred (Path.reach ~from:(Path.build dir) (Path.build target))
+    | None -> fun (_ : Path.Local.t) -> true
+    | Some pred -> fun target -> Predicate.test pred (Path.Local.to_string target)
   in
   let open Fiber.O in
   (* Map target paths taking into account the (promote (into <dir>)) field. *)
@@ -131,7 +124,7 @@ let promote
     | Some { loc; dir = into_dir } ->
       let into_dir =
         Path.Source.relative
-          (Path.Build.drop_build_context_exn dir)
+          (Path.Build.drop_build_context_exn targets.root)
           into_dir
           ~error_loc:loc
       in
@@ -148,13 +141,13 @@ let promote
       in
       Memo.run (Fs_memo.path_kind (In_source_dir into_dir))
       >>| (function
-      | Ok S_DIR -> fun src -> Path.Source.relative into_dir (Path.Build.basename src)
-      | Ok _other_kind -> promote_into_error (Pp.textf "%S is not a directory.")
-      | Error (ENOENT, _, _) ->
-        promote_into_error
-          (Pp.textf "Directory %S does not exist. Please create it manually.")
-      | Error unix_error ->
-        promote_into_error ~unix_error (Pp.textf "Cannot promote to directory %S."))
+       | Ok S_DIR -> fun src -> Path.Source.relative into_dir (Path.Build.basename src)
+       | Ok _other_kind -> promote_into_error (Pp.textf "%S is not a directory.")
+       | Error (ENOENT, _, _) ->
+         promote_into_error
+           (Pp.textf "Directory %S does not exist. Please create it manually.")
+       | Error unix_error ->
+         promote_into_error ~unix_error (Pp.textf "Cannot promote to directory %S."))
   in
   let directory_target_error ?unix_error ~dst_dir msgs =
     let msgs =
@@ -173,7 +166,7 @@ let promote
        Dune will notice its deletion. Furthermore, if we used a tracked version,
        [Path.mkdir_p] below would generate an unnecessary file-system event. *)
     match Fs_cache.(read Untracked.path_stat) (In_source_dir dst_dir) with
-    | Ok { st_kind; _ } when st_kind = S_DIR -> ()
+    | Ok { st_kind = S_DIR; _ } -> ()
     | Error (ENOENT, _, _) -> Path.mkdir_p (Path.source dst_dir)
     | Ok _ | Error _ ->
       (* Try to delete any unexpected stuff out of the way. In future, we might
@@ -191,8 +184,8 @@ let promote
   in
   (* Here we know that the promotion directory exists but we may need to create
      additional subdirectories for [targets.dirs]. *)
-  Path.Build.Map.iteri targets.dirs ~f:(fun dir (_filenames : _ String.Map.t) ->
-    create_directory_if_needed ~dir);
+  Path.Local.Map.iteri targets.dirs ~f:(fun dir (_ : Digest.t Filename.Map.t) ->
+    create_directory_if_needed ~dir:(Path.Build.append_local targets.root dir));
   let promote_until_clean =
     match promote.lifetime with
     | Until_clean -> true
@@ -205,6 +198,7 @@ let promote
         match selected_for_promotion src with
         | false -> Fiber.return ()
         | true ->
+          let src = Path.Build.append_local targets.root src in
           let dst = relocate src in
           promote_target_if_not_up_to_date
             ~src
@@ -216,7 +210,10 @@ let promote
   (* There can be some files or directories left over from earlier builds, so we
      need to remove them from [targets.dirs]. *)
   let remove_stale_files_and_subdirectories ~dir ~expected_filenames =
-    let dst_dir = relocate dir in
+    (* CR-someday rleshchinskiy: This can probably be made more efficient by relocating
+       root once. *)
+    let build_dir = Path.Build.append_local targets.root dir in
+    let dst_dir = relocate build_dir in
     (* We use a tracked version to subscribe to the correct directory listing.
        In this way, if a user manually creates a file inside a directory target,
        this function will rerun and remove it. *)
@@ -231,13 +228,13 @@ let promote
           if not (String.Map.mem expected_filenames filename)
           then Path.unlink_no_err (Path.relative dst_dir filename)
         | dirname, S_DIR ->
-          let src_dir = Path.Build.relative dir dirname in
-          if not (Path.Build.Map.mem targets.dirs src_dir)
+          let src_dir = Path.Local.relative dir dirname in
+          if not (Path.Local.Map.mem targets.dirs src_dir)
           then Path.rm_rf (Path.relative dst_dir dirname)
         | name, _kind -> Path.unlink_no_err (Path.relative dst_dir name))
   in
   Fiber.sequential_iter_seq
-    (Path.Build.Map.to_seq targets.dirs)
+    (Path.Local.Map.to_seq targets.dirs)
     ~f:(fun (dir, filenames) ->
       remove_stale_files_and_subdirectories ~dir ~expected_filenames:filenames)
 ;;

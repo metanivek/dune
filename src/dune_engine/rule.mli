@@ -1,7 +1,6 @@
 (** Representation of rules *)
 
 open Import
-module Action_builder := Action_builder0
 
 (** Information about the provenance of a build rule. *)
 module Info : sig
@@ -40,9 +39,9 @@ module Mode : sig
     | Fallback (** Only use this rule if the source files don't exist. *)
     | Promote of Promote.t (** Silently promote the targets to the source tree. *)
     | Ignore_source_files
-        (** Just ignore the source files entirely. This is for cases where the
-            targets are promoted only in a specific context, such as for
-            .install files. *)
+    (** Just ignore the source files entirely. This is for cases where the
+        targets are promoted only in a specific context, such as for
+        .install files. *)
 end
 
 module Id : sig
@@ -60,7 +59,6 @@ type t = private
   ; mode : Mode.t
   ; info : Info.t
   ; loc : Loc.t
-  ; dir : Path.Build.t (** Directory where all the targets are produced. *)
   }
 
 include Comparable_intf.S with type key := t
@@ -88,8 +86,8 @@ module Anonymous_action : sig
     { action : Action.Full.t
     ; loc : Loc.t
     ; dir : Path.Build.t
-        (** Directory the action is attached to. This is the directory where
-            the outcome of the action will be cached. *)
+    (** Directory the action is attached to. This is the directory where
+        the outcome of the action will be cached. *)
     ; alias : Alias.Name.t option (** For better error messages *)
     }
 end

@@ -57,7 +57,14 @@ val of_reproducible_fiber : 'a Fiber.t -> 'a t
     therefore be re-executed on every build run. *)
 val of_non_reproducible_fiber : 'a Fiber.t -> 'a t
 
+(** Convert a thunk to a Memo computation, making sure the thunk runs in the context of
+    the Memo computation rather than in the current context.
+
+    [of_thunk f] is equivalent to [return () >> f] but is more explicit. *)
 val of_thunk : (unit -> 'a t) -> 'a t
+
+(** Like [of_thunk] but accepts functions of any argument. *)
+val of_thunk_apply : ('a -> 'b t) -> 'a -> 'b t
 
 (** Combine results of two computations executed in sequence. *)
 val both : 'a t -> 'b t -> ('a * 'b) t
@@ -83,18 +90,11 @@ val sequential_map : 'a list -> f:('a -> 'b t) -> 'b list t
 val sequential_iter : 'a list -> f:('a -> unit t) -> unit t
 val parallel_map : 'a list -> f:('a -> 'b t) -> 'b list t
 val parallel_iter : 'a list -> f:('a -> unit t) -> unit t
+val parallel_iter_seq : 'a Seq.t -> f:('a -> unit t) -> unit t
 
-val parallel_iter_set
-  :  (module Set.S with type elt = 'a and type t = 's)
-  -> 's
-  -> f:('a -> unit t)
-  -> unit t
-
-module Make_map_traversals (Map : Map.S) : sig
-  val parallel_iter : 'a Map.t -> f:(Map.key -> 'a -> unit t) -> unit t
+module Make_parallel_map (Map : Map.S) : sig
   val parallel_map : 'a Map.t -> f:(Map.key -> 'a -> 'b t) -> 'b Map.t t
 end
-[@@inline always]
 
 (** A table memoizing results of executing a function. *)
 module Table : sig
@@ -436,43 +436,7 @@ module Debug : sig
   val verbose_diagnostics : bool ref
 end
 
-(** Various performance counters. Reset to zero at the start of every run. *)
-module Perf_counters : sig
-  (** This function must be called to enable performance counters. *)
-  val enable : unit -> unit
-
-  (** Number of nodes restored in the current run. *)
-  val nodes_restored_in_current_run : unit -> int
-
-  (** Number of nodes (re)computed in the current run. *)
-  val nodes_computed_in_current_run : unit -> int
-
-  (** Number of edges traversed in the current run. Some edges may be traversed
-      twice: first when restoring and then when (re)computing a value. *)
-  val edges_traversed_in_current_run : unit -> int
-
-  (** Number of nodes added to the cycle detection DAG in the current run; can't
-      exceed [nodes_restored_in_current_run + nodes_computed_in_current_run]. *)
-  val nodes_for_cycle_detection_in_current_run : unit -> int
-
-  (** Number of edges added to the cycle detection DAG in the current run; can't
-      exceed [edges_traversed_in_current_run]. *)
-  val edges_for_cycle_detection_in_current_run : unit -> int
-
-  (** Number of paths added to the cycle detection DAG in the current run. Each
-      path is a sequence of "forcing" edges followed by a "blocking" edge. *)
-  val paths_for_cycle_detection_in_current_run : unit -> int
-
-  (** A concise summary of performance counters. *)
-  val report_for_current_run : unit -> string
-
-  (** Raise if any internal invariants are violated. *)
-  val assert_invariants : unit -> unit
-
-  (** Reset the counters to zero. You typically don't need to call this function
-      directly (as counters are reset on every run) but it's useful for tests. *)
-  val reset : unit -> unit
-end
+module Metrics = Metrics
 
 module For_tests : sig
   (** After executing a memoized function with a given name and input, it is

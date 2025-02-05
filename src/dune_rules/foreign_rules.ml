@@ -8,29 +8,92 @@ module Source_tree_map_reduce =
          type t = Command.Args.without_targets Command.Args.t
        end))
 
-let default_foreign_flags t ~dir ~language =
-  Super_context.env_node t ~dir
-  >>| Env_node.foreign_flags
-  >>| (fun dict -> Foreign_language.Dict.get dict language)
+let default_context_flags (ctx : Build_context.t) ocaml_config ~project =
+  let cflags = Ocaml_config.ocamlc_cflags ocaml_config in
+  let c, cxx =
+    let cxxflags =
+      List.filter cflags ~f:(fun s -> not (String.is_prefix s ~prefix:"-std="))
+    in
+    match Dune_project.use_standard_c_and_cxx_flags project with
+    | None | Some false -> Action_builder.(return cflags, return cxxflags)
+    | Some true ->
+      let fdiagnostics_color =
+        Cxx_flags.ccomp_type ctx |> Action_builder.map ~f:Cxx_flags.fdiagnostics_color
+      in
+      let open Action_builder.O in
+      let c =
+        let+ fdiagnostics_color = fdiagnostics_color in
+        List.concat
+          [ cflags; Ocaml_config.ocamlc_cppflags ocaml_config; fdiagnostics_color ]
+      in
+      let cxx =
+        let+ fdiagnostics_color = fdiagnostics_color
+        and+ db_flags =
+          Cxx_flags.get_flags
+            ~for_:(Compile (Ocaml.Version.make (Ocaml_config.version ocaml_config)))
+            ctx
+        in
+        List.concat [ db_flags; cxxflags; fdiagnostics_color ]
+      in
+      c, cxx
+  in
+  Foreign_language.Dict.make ~c ~cxx
+;;
+
+let foreign_flags_env =
+  let f =
+    Env_stanza_db_flags.flags
+      ~name:"foreign_flags_env"
+      ~root:(fun ctx project ->
+        let* context = Context.DB.get ctx in
+        let+ ocaml = Context.ocaml context in
+        default_context_flags (Context.build_context context) ocaml.ocaml_config ~project)
+      ~f:(fun ~parent expander (env : Dune_env.config) ->
+        let+ parent = parent in
+        let foreign_flags lang =
+          Foreign_language.Dict.get env.foreign_flags lang
+          |> Expander.expand_and_eval_set
+               expander
+               ~standard:(Foreign_language.Dict.get parent lang)
+        in
+        Foreign_language.Dict.make ~c:(foreign_flags C) ~cxx:(foreign_flags Cxx))
+  in
+  fun ~dir ->
+    let* () = Memo.return () in
+    (Staged.unstage f) dir
+;;
+
+let () = Fdecl.set Expander.foreign_flags foreign_flags_env
+
+let default_foreign_flags ~dir ~language =
+  (let+ dict = foreign_flags_env ~dir in
+   Foreign_language.Dict.get dict language)
   |> Action_builder.of_memo_join
 ;;
 
 let foreign_flags t ~dir ~expander ~flags ~language =
-  let context = Super_context.context t in
-  let default = default_foreign_flags t ~dir ~language in
-  let open Action_builder.O in
-  let name = Foreign_language.proper_name language in
   let flags =
+    let open Action_builder.O in
     let* ccg =
       Action_builder.of_memo
         (let open Memo.O in
-         let+ ocaml = Context.ocaml context in
+         let+ ocaml =
+           let context = Super_context.context t in
+           Context.ocaml context
+         in
          Lib_config.cc_g ocaml.lib_config)
     in
-    let+ l = Expander.expand_and_eval_set expander flags ~standard:default in
+    let+ l =
+      let standard = default_foreign_flags ~dir ~language in
+      Expander.expand_and_eval_set expander flags ~standard
+    in
     l @ ccg
   in
-  Action_builder.memoize ~cutoff:(List.equal String.equal) (sprintf "%s flags" name) flags
+  Action_builder.memoize
+    ~cutoff:(List.equal String.equal)
+    (let name = Foreign_language.proper_name language in
+     sprintf "%s flags" name)
+    flags
 ;;
 
 (* Compute command line flags for the [include_dirs] field of [Foreign.Stubs.t]
@@ -38,11 +101,11 @@ let foreign_flags t ~dir ~expander ~flags ~language =
    dependencies. *)
 let include_dir_flags ~expander ~dir ~include_dirs =
   let lib_dir =
-    let scope = Expander.scope expander in
+    let scope = Scope.DB.find_by_dir dir in
     fun loc lib_name ->
       let open Resolve.Memo.O in
-      let+ lib = Lib.DB.resolve (Scope.libs scope) (loc, lib_name) in
-      Lib_info.src_dir (Lib.info lib)
+      let* libs = Memo.map scope ~f:Scope.libs |> Resolve.Memo.lift_memo in
+      Lib.DB.resolve libs (loc, lib_name) >>| Lib.info >>| Lib_info.src_dir
   in
   let args_of_include_dir include_dir =
     Resolve.Memo.args
@@ -109,7 +172,8 @@ let include_dir_flags ~expander ~dir ~include_dirs =
                    let+ l =
                      Source_tree_map_reduce.map_reduce
                        dir
-                       ~traverse:Sub_dirs.Status.Set.all
+                       ~traverse:Source_dir_status.Set.all
+                       ~trace_event_name:"Foreign rules"
                        ~f:(fun t ->
                          let deps =
                            let dir =
@@ -130,10 +194,10 @@ let include_dir_flags ~expander ~dir ~include_dirs =
   Command.Args.Dyn
     (let open Action_builder.O in
      let+ include_dirs_expanded =
-       let expand_str = Expander.No_deps.expand_str expander in
+       let expand = Expander.No_deps.expand expander ~mode:Single in
        Memo.List.concat_map
          include_dirs
-         ~f:(Foreign.Stubs.Include_dir.expand_include ~expand_str ~dir)
+         ~f:(Foreign.Stubs.Include_dir.expand_include ~expand ~dir:(Path.build dir))
        |> Action_builder.of_memo
      in
      Command.Args.S (List.map include_dirs_expanded ~f:args_of_include_dir))
@@ -148,7 +212,7 @@ let build_c
   (loc, (src : Foreign.Source.t), dst)
   =
   let ctx = Super_context.context sctx in
-  let* project = Scope.DB.find_by_dir dir >>| Scope.project in
+  let* project = Dune_load.find_project ~dir in
   let use_standard_flags = Dune_project.use_standard_c_and_cxx_flags project in
   let* ocaml = Context.ocaml ctx in
   let base_flags =
@@ -180,7 +244,7 @@ let build_c
           let open Action_builder.O in
           let+ default_flags =
             let dir = Path.Build.parent_exn dst in
-            default_foreign_flags sctx ~dir ~language:C
+            default_foreign_flags ~dir ~language:C
           and+ pkg_config_flags =
             let lib = External_lib_name.to_string field.external_library_name in
             Pkg_config.Query.read ~dir (Cflags lib) sctx
@@ -216,12 +280,6 @@ let build_c
                behaviour."
           ];
       foreign_flags sctx ~dir ~expander ~flags ~language:kind
-  and* c_compiler =
-    Super_context.resolve_program
-      ~loc:None
-      ~dir
-      sctx
-      (Ocaml_config.c_compiler ocaml.ocaml_config)
   in
   let output_param =
     match ocaml.lib_config.ccomp_type with
@@ -236,7 +294,14 @@ let build_c
      let src = Path.build (Foreign.Source.path src) in
      (* We have to execute the rule in the library directory as the .o is
         produced in the current directory *)
-     Command.run
+     let c_compiler =
+       Super_context.resolve_program
+         ~loc:None
+         ~dir
+         sctx
+         (Ocaml_config.c_compiler ocaml.ocaml_config)
+     in
+     Command.run_dyn_prog
        ~dir:(Path.build dir)
        c_compiler
        ([ Command.Args.dyn with_user_and_std_flags
@@ -266,7 +331,7 @@ let build_o_files
       Dir_contents.dirs dir_contents
       |> List.fold_left ~init:[] ~f:(fun acc dc ->
         Dir_contents.text_files dc
-        |> String.Set.fold ~init:acc ~f:(fun fn acc ->
+        |> Filename.Set.fold ~init:acc ~f:(fun fn acc ->
           if String.is_suffix fn ~suffix:Foreign_language.header_extension
           then Path.relative (Path.build (Dir_contents.dir dc)) fn :: acc
           else acc))
@@ -282,46 +347,53 @@ let build_o_files
              ])
       ]
   in
-  let ctx = Super_context.context sctx in
-  let* ocaml = Context.ocaml ctx in
-  String.Map.to_list_map foreign_sources ~f:(fun obj (loc, (src : Foreign.Source.t)) ->
-    let+ build_file =
-      let include_flags =
-        let extra_deps =
-          let extra_deps, sandbox =
-            match src.kind with
-            | Stubs stubs -> Dep_conf_eval.unnamed stubs.extra_deps ~expander
-            | Ctypes _ -> Action_builder.return (), Sandbox_config.default
-          in
-          (* We don't sandbox the C compiler, see comment in [build_file] about
-             this. *)
-          ignore sandbox;
-          Action_builder.map extra_deps ~f:(fun () -> Command.Args.empty)
-        in
-        let extra_flags =
-          include_dir_flags
-            ~expander
-            ~dir
-            ~include_dirs:
-              (match src.kind with
-               | Stubs stubs -> stubs.include_dirs
-               | Ctypes _ -> [])
-        in
-        Command.Args.S [ includes; extra_flags; Dyn extra_deps ]
-      in
-      let dst = Path.Build.relative dir (obj ^ ocaml.lib_config.ext_obj) in
-      let+ () =
-        build_c
-          ~kind:(Foreign.Source.language src)
-          ~sctx
-          ~dir
-          ~expander
-          ~include_flags
-          (loc, src, dst)
-      in
-      dst
+  let* ext_obj =
+    let+ ocaml =
+      let ctx = Super_context.context sctx in
+      Context.ocaml ctx
     in
-    Foreign.Source.mode src, Path.build build_file)
+    ocaml.lib_config.ext_obj
+  in
+  Foreign.Sources.to_list_map
+    foreign_sources
+    ~f:(fun obj (loc, (src : Foreign.Source.t)) ->
+      let+ build_file =
+        let include_flags =
+          let extra_deps =
+            let extra_deps, sandbox =
+              match src.kind with
+              | Stubs stubs -> Dep_conf_eval.unnamed stubs.extra_deps ~expander
+              | Ctypes _ -> Action_builder.return (), Sandbox_config.default
+            in
+            (* We don't sandbox the C compiler, see comment in [build_file] about
+               this. *)
+            ignore sandbox;
+            Action_builder.map extra_deps ~f:(fun () -> Command.Args.empty)
+          in
+          let extra_flags =
+            include_dir_flags
+              ~expander
+              ~dir
+              ~include_dirs:
+                (match src.kind with
+                 | Stubs stubs -> stubs.include_dirs
+                 | Ctypes _ -> [])
+          in
+          Command.Args.S [ includes; extra_flags; Dyn extra_deps ]
+        in
+        let dst = Path.Build.relative dir (obj ^ ext_obj) in
+        let+ () =
+          build_c
+            ~kind:(Foreign.Source.language src)
+            ~sctx
+            ~dir
+            ~expander
+            ~include_flags
+            (loc, src, dst)
+        in
+        dst
+      in
+      Foreign.Source.mode src, Path.build build_file)
   |> Memo.all_concurrently
   >>| List.fold_left ~init:Mode.Map.empty ~f:(fun tbl (for_mode, file) ->
     Mode.Map.Multi.cons tbl for_mode file)

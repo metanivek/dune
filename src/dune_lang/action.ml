@@ -70,7 +70,7 @@ end
 
 module Env_update = struct
   module Op = struct
-    type t =
+    type t = OpamParserTypes.env_update_op =
       | Eq
       | PlusEq
       | EqPlus
@@ -176,6 +176,7 @@ type t =
   | Substitute of String_with_vars.t * String_with_vars.t
   | Withenv of String_with_vars.t Env_update.t list * t
   | When of Slang.blang * t
+  | Format_dune_file of String_with_vars.t * String_with_vars.t
 
 let is_dev_null t = String_with_vars.is_pform t (Var Dev_null)
 
@@ -258,15 +259,7 @@ let sw = String_with_vars.decode
 
 let cstrs_dune_file t =
   let open Decoder in
-  [ ( "run"
-    , let+ args =
-        (* Although a single [Slang.t] evaluates to a list of strings, individual
-           terms of the command are represented by individual [Slang.t]s, hence
-           the [repeat] below. *)
-        repeat Slang.decode
-      in
-      Run args )
-  ; "with-accepted-exit-codes", decode_with_accepted_exit_codes t
+  [ "with-accepted-exit-codes", decode_with_accepted_exit_codes t
   ; ( "dynamic-run"
     , Syntax.since Action_plugin.syntax (0, 1)
       >>> let+ prog = sw
@@ -358,10 +351,31 @@ let cstrs_dune_file t =
     , Syntax.since Stanza.syntax (2, 7)
       >>> let+ script = sw in
           Cram script )
+  ; ( "format-dune-file"
+    , Syntax.since Stanza.syntax (3, 18)
+      >>> let+ src = sw
+          and+ dst = sw in
+          Format_dune_file (src, dst) )
   ]
 ;;
 
-let decode_dune_file = Decoder.fix @@ fun t -> Decoder.sum (cstrs_dune_file t)
+let decode_dune_file =
+  let dune_file_specific =
+    let open Decoder in
+    [ ( "run"
+      , (* In regular dune files the "run" action is parsed as a command and
+           argument list rather than with the slang dsl parser which is still
+           experimental. *)
+        let+ prog = sw
+        and+ args = repeat sw in
+        let slang =
+          Slang.Literal prog :: List.map args ~f:(fun arg -> Slang.Literal arg)
+        in
+        Run slang )
+    ]
+  in
+  Decoder.fix @@ fun t -> Decoder.sum (cstrs_dune_file t @ dune_file_specific)
+;;
 
 let decode_pkg =
   let cstrs_pkg t =
@@ -385,6 +399,14 @@ let decode_pkg =
         >>> let+ condition = Slang.decode_blang
             and+ action = t in
             When (condition, action) )
+    ; ( "run"
+      , let+ args =
+          (* Although a single [Slang.t] evaluates to a list of strings, individual
+             terms of the command are represented by individual [Slang.t]s, hence
+             the [repeat] below. *)
+          repeat Slang.decode
+        in
+        Run args )
     ]
   in
   Decoder.fix @@ fun t -> Decoder.sum (cstrs_dune_file t @ cstrs_pkg t)
@@ -442,6 +464,7 @@ let rec encode =
     List [ atom "withenv"; List (List.map ~f:Env_update.encode ops); encode t ]
   | When (condition, action) ->
     List [ atom "when"; Slang.encode_blang condition; encode action ]
+  | Format_dune_file (src, dst) -> List [ atom "format-dune-file"; sw src; sw dst ]
 ;;
 
 (* In [Action_exec] we rely on one-to-one mapping between the cwd-relative paths
@@ -479,7 +502,8 @@ let ensure_at_most_one_dynamic_run ~loc action =
     | Diff _
     | Substitute _
     | Patch _
-    | Cram _ -> false
+    | Cram _
+    | Format_dune_file _ -> false
     | Pipe (_, ts) | Progn ts | Concurrent ts ->
       List.fold_left ts ~init:false ~f:(fun acc t ->
         let have_dyn = loop t in
@@ -581,6 +605,7 @@ let rec map_string_with_vars t ~f =
     When
       ( blang_map_string_with_vars condition ~f:(slang_map_string_with_vars ~f)
       , map_string_with_vars t ~f )
+  | Format_dune_file (src, dst) -> Format_dune_file (f src, f dst)
 ;;
 
 let remove_locs = map_string_with_vars ~f:String_with_vars.remove_locs

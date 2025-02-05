@@ -6,10 +6,6 @@ module Timestamp = Event.Timestamp
 module Action_output_on_success = Execution_parameters.Action_output_on_success
 module Action_output_limit = Execution_parameters.Action_output_limit
 
-let with_directory_annot =
-  User_message.Annots.Key.create ~name:"with-directory" Path.to_dyn
-;;
-
 let limit_output = Dune_output_truncation.limit_output ~message:"TRUNCATED BY DUNE"
 
 module Failure_mode = struct
@@ -390,13 +386,18 @@ end = struct
              split_paths ("(internal)" :: targets_acc) (add_ctx ctx ctxs_acc) rest)
       in
       let target_names, contexts =
-        let file_targets, directory_targets =
+        let targets =
           match targets with
-          | None -> [], []
+          | None -> []
           | Some targets ->
-            Path.Build.Set.to_list targets.files, Path.Build.Set.to_list targets.dirs
+            Targets.Validated.fold
+              targets
+              ~init:[]
+              ~file:(fun path acc -> path :: acc)
+              ~dir:(fun dir acc -> dir :: acc)
+            |> List.rev
         in
-        split_paths [] Context_name.Set.empty (file_targets @ directory_targets)
+        split_paths [] Context_name.Set.empty targets
       in
       let targets =
         List.map target_names ~f:Filename.split_extension_after_dot
@@ -424,9 +425,9 @@ end = struct
   ;;
 
   let progname_and_purpose ~tag ~prog ~purpose =
-    let open Pp.O in
-    let progname = sprintf "%12s" (Fancy.short_prog_name_of_prog prog) in
-    Pp.tag tag (Pp.verbatim progname) ++ Pp.char ' ' ++ pp_purpose purpose
+    User_message.aligned_message
+      ~left:(tag, Fancy.short_prog_name_of_prog prog)
+      ~right:(pp_purpose purpose)
   ;;
 
   let pp_ok = progname_and_purpose ~tag:Ok
@@ -524,10 +525,9 @@ end = struct
       Has_output { with_color; without_color; has_embedded_location }
   ;;
 
-  let get_loc_and_annots ~dir ~metadata ~output =
+  let get_loc_annots_and_dir ~dir ~metadata ~output =
     let { loc; annots; _ } = metadata in
     let dir = Option.value dir ~default:Path.root in
-    let annots = User_message.Annots.set annots with_directory_annot dir in
     let annots =
       match output with
       | No_output -> annots
@@ -542,14 +542,15 @@ end = struct
           | errors -> User_message.Annots.set annots Compound_user_error.annot errors)
         else annots
     in
-    loc, annots
+    loc, annots, dir
   ;;
 
-  let fail ~loc ~annots paragraphs =
+  let fail ?dir ~loc ~annots paragraphs =
     (* We don't use [User_error.make] as it would add the "Error: " prefix. We
        don't need this prefix as it is already included in the output of the
        command. *)
-    raise (User_error.E (User_message.make ?loc ~annots paragraphs))
+    let dir = Option.map ~f:Path.to_string dir in
+    raise (User_error.E (User_message.make ?dir ?loc ~annots paragraphs))
   ;;
 
   let verbose t ~id ~metadata ~output ~command_line ~dir =
@@ -574,8 +575,9 @@ end = struct
         | Failed n -> sprintf "exited with code %d" n
         | Signaled signame -> sprintf "got signal %s" (Signal.name signame)
       in
-      let loc, annots = get_loc_and_annots ~dir ~metadata ~output in
+      let loc, annots, dir = get_loc_annots_and_dir ~dir ~metadata ~output in
       fail
+        ~dir
         ~loc
         ~annots
         ((Pp.tag User_message.Style.Kwd (Pp.verbatim "Command")
@@ -630,7 +632,7 @@ end = struct
       then Console.print_user_message (User_message.make paragraphs);
       n
     | Error error ->
-      let loc, annots = get_loc_and_annots ~dir ~metadata ~output in
+      let loc, annots, dir = get_loc_annots_and_dir ~dir ~metadata ~output in
       let paragraphs =
         match verbosity with
         | Short ->
@@ -653,7 +655,7 @@ end = struct
                 | Signaled signame ->
                   [ Pp.textf "Command got signal %s." (Signal.name signame) ]))
       in
-      fail ~loc ~annots paragraphs
+      fail ~dir ~loc ~annots paragraphs
   ;;
 end
 
@@ -809,15 +811,7 @@ let report_process_finished
         match metadata.purpose with
         | Internal_job -> []
         | Build_job None -> []
-        | Build_job (Some { files; dirs }) ->
-          let mkset s xs =
-            match
-              Path.Build.Set.to_list_map ~f:(fun x -> `String (Path.Build.to_string x)) xs
-            with
-            | [] -> []
-            | xs -> [ s, `List xs ]
-          in
-          [ "targets", `Assoc (mkset "files" files @ mkset "dirs" dirs) ]
+        | Build_job (Some targets) -> Targets.Validated.to_trace_args targets
       in
       let exit =
         match exit_status with
@@ -856,7 +850,7 @@ let await { response_file; pid; _ } =
   let+ process_info, termination_reason =
     Scheduler.wait_for_build_process pid ~is_process_group_leader:true
   in
-  Option.iter response_file ~f:Path.unlink;
+  Option.iter response_file ~f:Path.unlink_exn;
   process_info, termination_reason
 ;;
 

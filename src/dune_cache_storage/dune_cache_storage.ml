@@ -215,22 +215,22 @@ end
 module Artifacts = struct
   module Metadata_entry = struct
     type t =
-      { file_name : string
+      { file_path : string
       ; file_digest : Digest.t
       }
 
     let equal x y =
-      Digest.equal x.file_digest y.file_digest && String.equal x.file_name y.file_name
+      Digest.equal x.file_digest y.file_digest && String.equal x.file_path y.file_path
     ;;
 
-    let to_sexp { file_name; file_digest } =
-      Sexp.List [ Atom file_name; Atom (Digest.to_string file_digest) ]
+    let to_sexp { file_path; file_digest } =
+      Sexp.List [ Atom file_path; Atom (Digest.to_string file_digest) ]
     ;;
 
     let of_sexp = function
-      | Sexp.List [ Atom file_name; Atom file_digest ] ->
+      | Sexp.List [ Atom file_path; Atom file_digest ] ->
         (match Digest.from_hex file_digest with
-         | Some file_digest -> Ok { file_name; file_digest }
+         | Some file_digest -> Ok { file_path; file_digest }
          | None ->
            Error
              (Failure
@@ -337,4 +337,25 @@ let with_temp_file ?(prefix = "dune") ~suffix f =
 
 let with_temp_dir ?(prefix = "dune") ~suffix f =
   Fiber_util.Temp.with_temp_dir ~parent_dir:Layout.temp_dir ~prefix ~suffix ~f
+;;
+
+let clear () =
+  let rm_rf path = Path.rm_rf ~allow_external:true path in
+  let rmdir path =
+    try Path.rmdir path with
+    | Unix.Unix_error ((ENOENT | ENOTEMPTY), _, _) -> ()
+  in
+  let rm_rf_all versions dir =
+    List.iter versions ~f:(fun version ->
+      let dir = dir version in
+      rm_rf dir;
+      Option.iter ~f:rmdir (Path.parent dir))
+  in
+  rm_rf_all Version.Metadata.all Layout.Versioned.metadata_storage_dir;
+  rm_rf_all Version.File.all Layout.Versioned.file_storage_dir;
+  rm_rf_all Version.Value.all Layout.Versioned.value_storage_dir;
+  rm_rf Layout.temp_dir;
+  (* Do not catch errors when deleting the root directory so that they are
+     reported to the user. *)
+  Path.rmdir Layout.root_dir
 ;;

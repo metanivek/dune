@@ -1,5 +1,6 @@
 include Stdune
-module Digest = Dune_digest
+module Digest = Dune_digest.Digest
+module Cached_digest = Dune_digest.Cached_digest
 module Console = Dune_console
 module Metrics = Dune_metrics
 module Log = Dune_util.Log
@@ -10,6 +11,7 @@ module type Stringlike = Dune_util.Stringlike
 module Persistent = Dune_util.Persistent
 module Execution_env = Dune_util.Execution_env
 module Glob = Dune_glob.V1
+module Targets = Dune_targets
 include No_io
 include Dune_config
 

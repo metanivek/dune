@@ -25,7 +25,7 @@ Allow directories to be installable
   Leaving directory 'a'
 
   $ cat a/_build/install/default/lib/foo/dune-package
-  (lang dune 3.11)
+  (lang dune 3.18)
   (name foo)
   (sections (lib .) (share ../../share/foo))
   (files (lib (META dune-package)) (share ((dir bar) x y)))
@@ -49,12 +49,4 @@ Allow directories to be installable
 
   $ OCAMLPATH=$PWD/prefix/lib/:$OCAMLPATH dune build --root=b @foo --display=short
   Entering directory 'b'
-  Error:
-  File
-  "$TESTCASE_ROOT/prefix/lib/foo/dune-package",
-  line 8, characters 51-52:
-  Error: S-expression of the form (<name> <values>...) expected
-  
-  -> required by alias foo in dune:1
   Leaving directory 'b'
-  [1]

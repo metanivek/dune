@@ -18,7 +18,9 @@ Reproducing test case for #5532.
   $ dune build
   Warning: Coq Language Versions lower than 0.8 have been deprecated in Dune
   3.8 and will be removed in an upcoming Dune version.
-  File "dune", line 1, characters 0-26:
+  Hint: To disable this warning, add the following to your dune-project file:
+  (warnings (deprecated_coq_lang_lt_08 disabled))
+  File "dune", lines 1-2, characters 0-26:
   1 | (coq.theory
   2 |  (name basic))
   A

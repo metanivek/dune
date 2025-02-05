@@ -1,7 +1,7 @@
 open Import
+open Memo.O
 
 let pkg_config_binary sctx ~dir =
-  let open Memo.O in
   let+ env = Super_context.env_node sctx ~dir >>= Env_node.external_env in
   match Env.get env "PKG_CONFIG" with
   | None -> "pkg-config"
@@ -44,10 +44,9 @@ module Query = struct
   let read t sctx ~dir =
     let open Action_builder.O in
     let* bin =
-      Action_builder.of_memo
-        (let open Memo.O in
-         let* pkg_config = pkg_config_binary sctx ~dir in
-         Super_context.resolve_program sctx ~loc:None ~dir pkg_config)
+      let open Action_builder.O in
+      let* pkg_config = Action_builder.of_memo @@ pkg_config_binary sctx ~dir in
+      Super_context.resolve_program sctx ~loc:None ~dir pkg_config
     in
     match bin with
     | Error _ -> Action_builder.return (default t)
@@ -59,21 +58,16 @@ module Query = struct
 end
 
 let gen_rule sctx ~loc ~dir query =
-  let open Memo.O in
   let* bin =
-    let open Memo.O in
     let* pkg_config = pkg_config_binary sctx ~dir in
-    Super_context.resolve_program sctx ~loc:(Some loc) ~dir pkg_config
+    Super_context.resolve_program_memo sctx ~loc:(Some loc) ~dir pkg_config
   in
   match bin with
   | Error _ -> Memo.return @@ Error `Not_found
   | Ok _ as bin ->
     let* command =
       let+ env =
-        let* dune_version =
-          let+ expander = Super_context.expander sctx ~dir in
-          expander |> Expander.scope |> Scope.project |> Dune_project.dune_version
-        in
+        let* dune_version = Dune_load.find_project ~dir >>| Dune_project.dune_version in
         let* env_node = Super_context.env_node sctx ~dir in
         if dune_version >= (3, 8)
         then Env_node.external_env env_node

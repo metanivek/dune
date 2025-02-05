@@ -1,8 +1,8 @@
 (** Actions as defined an executed by the build system.
 
-    These executions correpsond to primitives that the build system knows how to
+    These executions correspond to primitives that the build system knows how to
     execute. These usually, but not necessarily correspond to actions written by
-    the user in [Action_dune_lang.t] *)
+    the user in [Dune_lang.Action.t] *)
 
 open! Import
 open Dune_util.Action
@@ -46,6 +46,7 @@ module Diff : sig
 end
 
 module Ext : module type of Action_intf.Ext
+include module type of Action_intf.Exec
 
 (** result of the lookup of a program, the path to it or information about the
     failure and possibly a hint how to fix it *)
@@ -77,31 +78,31 @@ end
 
 include
   Action_intf.Ast
-    with type program := Prog.t
-    with type path := Path.t
-    with type target := Path.Build.t
-    with type string := string
-    with type ext :=
-      (module Ext.Instance with type target = Path.Build.t and type path = Path.t)
+  with type program := Prog.t
+  with type path := Path.t
+  with type target := Path.Build.t
+  with type string := string
+  with type ext :=
+    (module Ext.Instance with type target = Path.Build.t and type path = Path.t)
 
 include
   Action_intf.Helpers
-    with type program := Prog.t
-    with type path := Path.t
-    with type target := Path.Build.t
-    with type string := string
-    with type t := t
+  with type program := Prog.t
+  with type path := Path.t
+  with type target := Path.Build.t
+  with type string := string
+  with type t := t
 
 include Monoid with type t := t
 
 module For_shell : sig
   include
     Action_intf.Ast
-      with type program := string
-      with type path := string
-      with type target := string
-      with type string := string
-      with type ext := Dune_sexp.t
+    with type program := string
+    with type path := string
+    with type target := string
+    with type string := string
+    with type ext := Sexp.t
 end
 
 (** Convert the action to a format suitable for printing *)
@@ -151,7 +152,8 @@ module Full : sig
   val make
     :  ?env:Env.t (** default [Env.empty] *)
     -> ?locks:Path.t list (** default [[]] *)
-    -> ?can_go_in_shared_cache:bool (** default [true] *)
+    -> ?can_go_in_shared_cache:bool
+         (** default [!Clflags.can_fo_in_shared_cache_default] *)
     -> ?sandbox:Sandbox_config.t (** default [Sandbox_config.default] *)
     -> action
     -> t

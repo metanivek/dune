@@ -1,4 +1,5 @@
 open Import
+open Memo.O
 
 (* This module expands either a (library ... (ctypes ...)) rule or an
    (executables ... (ctypes ...)) rule into the generated set of .ml and .c
@@ -53,9 +54,6 @@ open Import
    above. This module uses dune internal features to simplify the stub
    generation. As a result, there are no intermediate libraries (or
    packages). *)
-
-module Buildable = Dune_file.Buildable
-module Library = Dune_file.Library
 
 let verbatimf fmt = Printf.ksprintf (fun s -> Pp.concat [ Pp.verbatim s; Pp.newline ]) fmt
 
@@ -179,15 +177,18 @@ let build_c_program
   ~deps
   =
   let ctx = Super_context.context sctx in
-  let open Memo.O in
-  let* ocaml = Context.ocaml ctx in
-  let* exe =
+  let ocaml = Context.ocaml ctx in
+  let exe =
+    let open Action_builder.O in
+    let* ocaml = Action_builder.of_memo ocaml in
     Ocaml_config.c_compiler ocaml.ocaml_config
     |> Super_context.resolve_program ~loc:None ~dir sctx
   in
   let project = Scope.project scope in
   let with_user_and_std_flags =
     let base_flags =
+      let open Action_builder.O in
+      let+ ocaml = Action_builder.of_memo ocaml in
       let use_standard_flags = Dune_project.use_standard_c_and_cxx_flags project in
       let cfg = ocaml.ocaml_config in
       let fdo_flags = Command.Args.As (Fdo.c_flags ctx) in
@@ -211,9 +212,11 @@ let build_c_program
         ~flags:Ordered_set_lang.Unexpanded.standard
         ~language:C
     in
-    Command.Args.S [ base_flags; As foreign_flags ]
+    Command.Args.S [ Dyn base_flags; As foreign_flags ]
   in
   let include_args =
+    let open Action_builder.O in
+    let* ocaml = Action_builder.of_memo ocaml in
     let ocaml_where = ocaml.lib_config.stdlib_dir in
     (* XXX: need glob dependency *)
     let open Action_builder.O in
@@ -222,7 +225,8 @@ let build_c_program
       Lib.DB.resolve (Scope.libs scope) (Loc.none, ctypes) |> Resolve.Memo.read
     in
     let ctypes_include_dirs =
-      Lib_flags.L.include_paths [ lib ] (Ocaml Native) |> Path.Set.to_list
+      Lib_flags.L.include_paths [ lib ] (Ocaml Native) ocaml.lib_config
+      |> Path.Set.to_list
     in
     let include_dirs = ocaml_where :: ctypes_include_dirs in
     Command.Args.S
@@ -257,7 +261,8 @@ let build_c_program
       ]
     in
     let open Action_builder.With_targets.O in
-    Action_builder.with_no_targets deps >>> Command.run ~dir:(Path.build dir) exe args
+    Action_builder.with_no_targets deps
+    >>> Command.run_dyn_prog ~dir:(Path.build dir) exe args
   in
   Super_context.add_rule sctx ~dir action
 ;;
@@ -292,7 +297,6 @@ let gen_rules ~cctx ~(buildable : Buildable.t) ~loc ~scope ~dir ~sctx =
   let type_description_functor = ctypes.type_description.functor_ in
   let c_types_includer_module = ctypes.generated_types in
   let c_generated_types_module = Ctypes_field.c_generated_types_module ctypes in
-  let open Memo.O in
   let foreign_archives_deps =
     let { Lib_config.ext_lib; ext_dll; _ } =
       (Compilation_context.ocaml cctx).lib_config
@@ -328,7 +332,6 @@ let gen_rules ~cctx ~(buildable : Buildable.t) ~loc ~scope ~dir ~sctx =
       |> Memo.return
     | Pkg_config ->
       let+ () =
-        let open Memo.O in
         let setup query =
           let* res = Pkg_config.gen_rule sctx ~dir ~loc query in
           match res with

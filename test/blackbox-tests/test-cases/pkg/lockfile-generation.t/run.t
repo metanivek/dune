@@ -28,10 +28,11 @@ Generate a `dune-project` file.
   >     "bar" {>= "0.2"}
   > ]
   > EOF
+  $ add_mock_repo_if_needed
 
 Run the solver and generate a lock directory.
 
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
+  $ dune pkg lock
   Solution for dune.lock:
   - bar.0.5.0
   - baz.0.1.0
@@ -61,7 +62,7 @@ Print the contents of each file in the lockdir:
   
   (version 0.0.1)
   
-  (deps baz bar)
+  (depends baz bar)
   
   
   ---
@@ -69,6 +70,8 @@ Print the contents of each file in the lockdir:
   dune.lock/lock.dune:
   
   (lang package 0.1)
+  
+  (dependency_hash 8940266fc1693f5f2a008d1d58c1e1b9)
   
   (repositories
    (complete false)
@@ -79,7 +82,7 @@ Print the contents of each file in the lockdir:
   
 
 Run the solver again preferring oldest versions of dependencies:
-  $ dune pkg lock --version-preference=oldest --opam-repository-path=mock-opam-repository
+  $ dune pkg lock --version-preference=oldest
   Solution for dune.lock:
   - bar.0.4.0
   - baz.0.1.0
@@ -104,7 +107,7 @@ Run the solver again preferring oldest versions of dependencies:
   
   (version 0.0.1)
   
-  (deps baz bar)
+  (depends baz bar)
   
   
   ---
@@ -112,6 +115,8 @@ Run the solver again preferring oldest versions of dependencies:
   dune.lock/lock.dune:
   
   (lang package 0.1)
+  
+  (dependency_hash 8940266fc1693f5f2a008d1d58c1e1b9)
   
   (repositories
    (complete false)
@@ -132,10 +137,11 @@ Regenerate the `dune-project` file introducing an unsatisfiable constraint.
   > EOF
 
 Run the solver again. This time it will fail.
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
-  Error: Unable to solve dependencies in build context: default
-  Can't find all required versions.
-  Selected: baz.0.1.0 foo.0.0.1 lockfile_generation_test.dev
+  $ dune pkg lock
+  Error: Unable to solve dependencies for the following lock directories:
+  Lock directory dune.lock:
+  Couldn't solve the package dependency formula.
+  Selected candidates: baz.0.1.0 foo.0.0.1 lockfile_generation_test.dev
   - bar -> (problem)
       foo 0.0.1 requires >= 0.2
       lockfile_generation_test dev requires >= 0.6
@@ -162,7 +168,7 @@ should pick one of them.
 After running this we expact a solution that has either `bar` or `baz` but not
 both.
 
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
+  $ dune pkg lock
   Solution for dune.lock:
   - bar.0.5.0
   - bar-or-baz.0.0.1
@@ -186,7 +192,7 @@ patterns that can't be simplified
 After runninng we expect the solution to have quux and either baz or quz as
 well as bar or qux.
 
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
+  $ dune pkg lock
   Solution for dune.lock:
   - bar.0.5.0
   - baz.0.1.0
@@ -206,7 +212,7 @@ in between.
   > depends: [ ("bar" & "quux") | "baz" ]
   > EOF
 
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
+  $ dune pkg lock
   Solution for dune.lock:
   - bar.0.5.0
   - priorities.0.0.1
@@ -233,7 +239,7 @@ versions 1 or 3, as well as making sure it doesn't pick the newest version.
 With versions 1 and 3 negated and version 4 removed via version constraint,
 we'd expect version 2 to be chosen:
 
-  $ dune pkg lock --opam-repository-path=mock-opam-repository
+  $ dune pkg lock
   Solution for dune.lock:
   - negation.0.0.1
   - pkg.2

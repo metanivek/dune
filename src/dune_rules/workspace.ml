@@ -2,13 +2,147 @@ open Import
 open Dune_lang.Decoder
 module Repository = Dune_pkg.Pkg_workspace.Repository
 
+let default_repositories = [ Repository.overlay; Repository.upstream ]
+
+module Lock_dir = struct
+  type t =
+    { path : Path.Source.t
+    ; version_preference : Dune_pkg.Version_preference.t option
+    ; solver_env : Dune_pkg.Solver_env.t option
+    ; unset_solver_vars : Package_variable_name.Set.t option
+    ; repositories : (Loc.t * Dune_pkg.Pkg_workspace.Repository.Name.t) list
+    ; constraints : Dune_lang.Package_dependency.t list
+    ; pins : (Loc.t * string) list
+    }
+
+  let to_dyn
+    { path
+    ; version_preference
+    ; solver_env
+    ; unset_solver_vars
+    ; repositories
+    ; constraints
+    ; pins
+    }
+    =
+    Dyn.record
+      [ "path", Path.Source.to_dyn path
+      ; ( "version_preference"
+        , Dyn.option Dune_pkg.Version_preference.to_dyn version_preference )
+      ; "solver_env", Dyn.option Dune_pkg.Solver_env.to_dyn solver_env
+      ; "unset_solver_vars", Dyn.option Package_variable_name.Set.to_dyn unset_solver_vars
+      ; ( "repositories"
+        , Dyn.list
+            Dune_pkg.Pkg_workspace.Repository.Name.to_dyn
+            (List.map repositories ~f:snd) )
+      ; "constraints", Dyn.list Dune_lang.Package_dependency.to_dyn constraints
+      ; "pins", (Dyn.list Dyn.string) (List.map pins ~f:snd)
+      ]
+  ;;
+
+  let hash
+    { path
+    ; version_preference
+    ; solver_env
+    ; unset_solver_vars
+    ; repositories
+    ; constraints
+    ; pins
+    }
+    =
+    Poly.hash
+      ( path
+      , version_preference
+      , solver_env
+      , unset_solver_vars
+      , repositories
+      , constraints
+      , pins )
+  ;;
+
+  let equal
+    { path
+    ; version_preference
+    ; solver_env
+    ; unset_solver_vars
+    ; repositories
+    ; constraints
+    ; pins
+    }
+    t
+    =
+    Path.Source.equal path t.path
+    && Option.equal
+         Dune_pkg.Version_preference.equal
+         version_preference
+         t.version_preference
+    && Option.equal Dune_pkg.Solver_env.equal solver_env t.solver_env
+    && Option.equal Package_variable_name.Set.equal unset_solver_vars t.unset_solver_vars
+    && List.equal
+         (Tuple.T2.equal Loc.equal Dune_pkg.Pkg_workspace.Repository.Name.equal)
+         repositories
+         t.repositories
+    && List.equal Dune_lang.Package_dependency.equal constraints t.constraints
+    && List.equal (Tuple.T2.equal Loc.equal String.equal) pins t.pins
+  ;;
+
+  let decode ~dir =
+    let repositories_of_ordered_set ordered_set =
+      Dune_lang.Ordered_set_lang.eval
+        ordered_set
+        ~parse:(fun ~loc string ->
+          loc, Dune_pkg.Pkg_workspace.Repository.Name.parse_string_exn (loc, string))
+        ~eq:(fun (_, x) (_, y) -> Dune_pkg.Pkg_workspace.Repository.Name.equal x y)
+        ~standard:
+          (List.map default_repositories ~f:(fun d -> Loc.none, Repository.name d))
+    in
+    let decode =
+      let+ path =
+        let+ path = field ~default:"dune.lock" "path" string in
+        Path.Source.relative dir path
+      and+ solver_env = field_o "solver_env" Dune_pkg.Solver_env.decode
+      and+ unset_solver_vars =
+        field_o "unset_solver_vars" (repeat (located Package_variable_name.decode))
+      and+ version_preference =
+        field_o "version_preference" Dune_pkg.Version_preference.decode
+      and+ repositories = Dune_lang.Ordered_set_lang.field "repositories"
+      and+ constraints =
+        field ~default:[] "constraints" (repeat Dune_lang.Package_dependency.decode)
+      and+ pins = field ~default:[] "pins" (repeat (located string)) in
+      Option.iter solver_env ~f:(fun solver_env ->
+        Option.iter
+          unset_solver_vars
+          ~f:
+            (List.iter ~f:(fun (loc, variable) ->
+               if Option.is_some (Dune_pkg.Solver_env.get solver_env variable)
+               then
+                 User_error.raise
+                   ~loc
+                   [ Pp.textf
+                       "Variable %S appears in both 'solver_env' and 'unset_solver_vars' \
+                        which is not allowed."
+                       (Package_variable_name.to_string variable)
+                   ])));
+      let unset_solver_vars =
+        Option.map unset_solver_vars ~f:(fun x ->
+          List.map x ~f:snd |> Package_variable_name.Set.of_list)
+      in
+      { path
+      ; solver_env
+      ; unset_solver_vars
+      ; version_preference
+      ; repositories = repositories_of_ordered_set repositories
+      ; constraints
+      ; pins
+      }
+    in
+    fields decode
+  ;;
+end
+
 (* workspace files use the same version numbers as dune-project files for
    simplicity *)
 let syntax = Stanza.syntax
-
-let all_binaries (e : Dune_env.Stanza.t) =
-  List.concat_map e.rules ~f:(fun (_, config) -> config.binaries)
-;;
 
 let env_field, env_field_lazy =
   let make f g =
@@ -17,40 +151,86 @@ let env_field, env_field_lazy =
     @@ let+ () = Dune_lang.Syntax.since syntax (1, 1)
        and+ version = Dune_lang.Syntax.get_exn syntax
        and+ loc = loc
-       and+ s = Dune_env.Stanza.decode in
-       Option.some
-       @@
-       let binaries = all_binaries s in
-       if List.is_empty binaries
-       then s
-       else (
+       and+ s = Dune_env.decode in
+       let s =
          let minimum_version = 3, 2 in
-         if version < minimum_version
-         then (
-           let message =
-             User_message.make
-               ~loc
-               [ Pp.text
-                   (Dune_lang.Syntax.Error_msg.since
-                      syntax
-                      minimum_version
-                      ~what:"'binaries' in an 'env' stanza in a dune-workspace file")
-               ]
-           in
-           Dune_env.Stanza.add_warning ~message s |> Dune_env.Stanza.add_error ~message)
+         if version >= minimum_version
+         then s
          else (
-           match File_binding.Unexpanded.L.find_pform binaries with
+           match List.find_map s.rules ~f:(fun (_, config) -> config.binaries) with
            | None -> s
-           | Some loc ->
-             User_error.raise
-               ~loc
-               [ Pp.text
-                   "Variables are not supported in 'binaries' in an 'env' stanza in a \
-                    dune-workspace file."
-               ]))
+           | Some _ (* CR-rgrinberg: the location should come from this field *) ->
+             let message =
+               User_message.make
+                 ~loc
+                 [ Pp.text
+                     (Dune_lang.Syntax.Error_msg.since
+                        syntax
+                        minimum_version
+                        ~what:"\"binaries\" in an \"env\" stanza in a dune-workspace file")
+                 ]
+             in
+             Dune_env.add_warning ~message s |> Dune_env.add_error ~message)
+       in
+       match
+         List.find_map s.rules ~f:(fun (_, config) ->
+           Option.bind config.binaries ~f:File_binding.Unexpanded.L.find_pform)
+       with
+       | None -> Some s
+       | Some loc ->
+         (* CR-rgrinberg: why do we forbid variables here?. *)
+         User_error.raise
+           ~loc
+           [ Pp.text
+               "Variables are not supported in \"binaries\" in an \"env\" stanza in a \
+                dune-workspace file."
+           ]
   in
   make Fun.id Fun.id, make Lazy.from_val lazy_
 ;;
+
+module Lock_dir_selection = struct
+  type t =
+    | Name of string
+    | Cond of Dune_lang.Cond.t
+
+  let to_dyn = function
+    | Name name -> Dyn.variant "Name" [ Dyn.string name ]
+    | Cond cond -> Dyn.variant "Cond" [ Dune_lang.Cond.to_dyn cond ]
+  ;;
+
+  let decode =
+    enter
+      (let+ () = keyword "cond"
+       and+ cond = Dune_lang.Cond.decode in
+       Cond cond)
+    <|> let+ name = string in
+        Name name
+  ;;
+
+  let equal a b =
+    match a, b with
+    | Name a, Name b -> String.equal a b
+    | Cond a, Cond b -> Dune_lang.Cond.equal a b
+    | _ -> false
+  ;;
+
+  let eval t ~dir ~f =
+    let open Memo.O in
+    match t with
+    | Name name -> Memo.return (Path.Source.relative dir name)
+    | Cond cond ->
+      let+ value = Cond_expand.eval cond ~dir:(Path.source dir) ~f in
+      (match (value : Value.t option) with
+       | None ->
+         User_error.raise
+           ~loc:cond.loc
+           [ Pp.text "None of the conditions matched so no lockdir could be chosen." ]
+       | Some (String s) -> Path.Source.relative dir s
+       | Some (Dir p | Path p) ->
+         Path.reach ~from:(Path.source dir) p |> Path.Source.of_string)
+  ;;
+end
 
 module Context = struct
   module Target = struct
@@ -86,12 +266,34 @@ module Context = struct
     ;;
   end
 
+  module Merlin = struct
+    type t =
+      | Selected
+      | Rules_only
+      | Not_selected
+
+    let equal x y =
+      match x, y with
+      | Selected, Selected | Rules_only, Rules_only | Not_selected, Not_selected -> true
+      | Selected, (Rules_only | Not_selected)
+      | (Rules_only | Not_selected), Selected
+      | Rules_only, Not_selected
+      | Not_selected, Rules_only -> false
+    ;;
+
+    let to_dyn : t -> Dyn.t = function
+      | Selected -> String "selected"
+      | Rules_only -> String "rules_only"
+      | Not_selected -> String "not_selected"
+    ;;
+  end
+
   module Common = struct
     type t =
       { loc : Loc.t
       ; profile : Profile.t
       ; targets : Target.t list
-      ; env : Dune_env.Stanza.t option
+      ; env : Dune_env.t option
       ; toolchain : Context_name.t option
       ; name : Context_name.t
       ; host_context : Context_name.t option
@@ -99,7 +301,7 @@ module Context = struct
       ; fdo_target_exe : Path.t option
       ; dynamically_linked_foreign_archives : bool
       ; instrument_with : Lib_name.t list
-      ; merlin : bool
+      ; merlin : Merlin.t
       }
 
     let to_dyn { name; targets; host_context; _ } =
@@ -128,7 +330,7 @@ module Context = struct
       =
       Profile.equal profile t.profile
       && List.equal Target.equal targets t.targets
-      && Option.equal Dune_env.Stanza.equal env t.env
+      && Option.equal Dune_env.equal env t.env
       && Option.equal Context_name.equal toolchain t.toolchain
       && Context_name.equal name t.name
       && Option.equal Context_name.equal host_context t.host_context
@@ -138,7 +340,7 @@ module Context = struct
            dynamically_linked_foreign_archives
            t.dynamically_linked_foreign_archives
       && List.equal Lib_name.equal instrument_with t.instrument_with
-      && Bool.equal merlin t.merlin
+      && Merlin.equal merlin t.merlin
     ;;
 
     let fdo_suffix t =
@@ -172,13 +374,16 @@ module Context = struct
           then Path.(relative root file)
           else
             User_error.raise
-              [ Pp.textf
-                  "`fdo %s` expects executable filename ending with .exe extension, not \
-                   %s. \n\
-                   Please specify the name of the executable to optimize, including path \
-                   from <root>."
-                  file
-                  ext
+              [ Pp.concat
+                  ~sep:Pp.space
+                  [ User_message.command (sprintf "fdo %s" file)
+                  ; Pp.textf
+                      "expects executable filename ending with .exe extension, not %s. \n\
+                       Please specify the name of the executable to optimize, including \
+                       path from <root>."
+                      ext
+                  ]
+                |> Pp.hovbox
               ]
         in
         field_o "fdo" (Dune_lang.Syntax.since syntax (2, 0) >>> map string ~f)
@@ -201,7 +406,12 @@ module Context = struct
           "instrument_with"
           (Dune_lang.Syntax.since syntax (2, 7) >>> repeat Lib_name.decode)
       and+ loc = loc
-      and+ merlin = field_b "merlin" in
+      and+ merlin = field_b "merlin"
+      and+ generate_merlin_rules =
+        field_b
+          ~check:(Dune_lang.Syntax.since Stanza.syntax (3, 16))
+          "generate_merlin_rules"
+      in
       fun ~profile_default ~instrument_with_default ->
         let profile = Option.value profile ~default:profile_default in
         let instrument_with =
@@ -226,7 +436,13 @@ module Context = struct
         ; fdo_target_exe
         ; dynamically_linked_foreign_archives
         ; instrument_with
-        ; merlin
+        ; merlin =
+            (match merlin with
+             | true -> Selected
+             | false ->
+               (match generate_merlin_rules with
+                | true -> Rules_only
+                | false -> Not_selected))
         }
     ;;
   end
@@ -246,6 +462,14 @@ module Context = struct
       Common.equal base t.base && Opam_switch.equal switch t.switch
     ;;
 
+    let name_hint_opt name =
+      if String.is_prefix ~prefix:"/" name
+      then (
+        let context_name = Filename.basename name in
+        Some [ Pp.textf "(name %s) would be a valid context name" context_name ])
+      else None
+    ;;
+
     let decode =
       let+ loc_switch, switch = field "switch" (located string)
       and+ name = field_o "name" Context_name.decode
@@ -263,9 +487,10 @@ module Context = struct
              | None ->
                User_error.raise
                  ~loc:loc_switch
-                 [ Pp.textf "Generated context name %S is invalid" name
-                 ; Pp.text
-                     "Please specify a context name manually with the (name ..) field"
+                 ?hints:(name_hint_opt name)
+                 [ Pp.textf
+                     "The name generated from this switch can not be used as a context \
+                      name. Please use (name) to disambiguate."
                  ])
         in
         let base = { base with targets = Target.add base.targets x; name } in
@@ -277,50 +502,27 @@ module Context = struct
   module Default = struct
     type t =
       { base : Common.t
-      ; lock : Path.Source.t option
-      ; version_preference : Dune_pkg.Version_preference.t option
-      ; solver_sys_vars : Dune_pkg.Solver_env.Variable.Sys.Bindings.t option
-      ; repositories : Dune_pkg.Pkg_workspace.Repository.Name.t list
+      ; lock_dir : Lock_dir_selection.t option
       }
 
-    let to_dyn { base; lock; version_preference; solver_sys_vars; repositories } =
+    let to_dyn { base; lock_dir } =
       Dyn.record
         [ "base", Common.to_dyn base
-        ; "lock", Dyn.(option Path.Source.to_dyn) lock
-        ; ( "version_preference"
-          , Dyn.option Dune_pkg.Version_preference.to_dyn version_preference )
-        ; ( "solver_sys_vars"
-          , Dyn.option Dune_pkg.Solver_env.Variable.Sys.Bindings.to_dyn solver_sys_vars )
-        ; ( "repositories"
-          , Dyn.list Dune_pkg.Pkg_workspace.Repository.Name.to_dyn repositories )
+        ; "lock_dir", Dyn.(option Lock_dir_selection.to_dyn) lock_dir
         ]
     ;;
 
     let decode =
-      let repositories_of_ordered_set ordered_set =
-        Dune_lang.Ordered_set_lang.eval
-          ordered_set
-          ~parse:(fun ~loc string ->
-            Dune_pkg.Pkg_workspace.Repository.Name.parse_string_exn (loc, string))
-          ~eq:Dune_pkg.Pkg_workspace.Repository.Name.equal
-          ~standard:[ Dune_pkg.Pkg_workspace.Repository.Name.of_string "default" ]
-      in
       let+ common = Common.decode
       and+ name =
         field_o "name" (Dune_lang.Syntax.since syntax (1, 10) >>> Context_name.decode)
-      and+ lock =
+      and+ lock_dir =
         (* TODO
            1. guard before version check before releasing
            2. allow external paths
         *)
-        field_o "lock" (Dune_lang.Path.Local.decode ~dir:(Path.source Path.Source.root))
-      and+ version_preference =
-        field_o "version_preference" Dune_pkg.Version_preference.decode
-      and+ solver_sys_vars =
-        field_o "solver_sys_vars" Dune_pkg.Solver_env.Variable.Sys.Bindings.decode
-      and+ repositories_osl = Dune_lang.Ordered_set_lang.field "repositories" in
-      let repositories = repositories_of_ordered_set repositories_osl in
-      let lock = Option.map lock ~f:Path.as_in_source_tree_exn in
+        field_o "lock_dir" Lock_dir_selection.decode
+      in
       fun ~profile_default ~instrument_with_default ~x ->
         let common = common ~profile_default ~instrument_with_default in
         let default =
@@ -330,24 +532,12 @@ module Context = struct
         in
         let name = Option.value ~default name in
         let base = { common with targets = Target.add common.targets x; name } in
-        { base; lock; version_preference; solver_sys_vars; repositories }
+        { base; lock_dir }
     ;;
 
-    let equal { base; lock; version_preference; solver_sys_vars; repositories } t =
+    let equal { base; lock_dir } t =
       Common.equal base t.base
-      && Option.equal Path.Source.equal lock t.lock
-      && Option.equal
-           Dune_pkg.Version_preference.equal
-           version_preference
-           t.version_preference
-      && Option.equal
-           Dune_pkg.Solver_env.Variable.Sys.Bindings.equal
-           solver_sys_vars
-           t.solver_sys_vars
-      && List.equal
-           Dune_pkg.Pkg_workspace.Repository.Name.equal
-           repositories
-           t.repositories
+      && Option.equal Lock_dir_selection.equal lock_dir t.lock_dir
     ;;
   end
 
@@ -410,10 +600,7 @@ module Context = struct
 
   let default ~x ~profile ~instrument_with =
     Default
-      { lock = None
-      ; version_preference = None
-      ; solver_sys_vars = None
-      ; repositories = [ Dune_pkg.Pkg_workspace.Repository.Name.of_string "default" ]
+      { lock_dir = None
       ; base =
           { loc = Loc.of_pos __POS__
           ; targets = [ Option.value x ~default:Target.Native ]
@@ -426,7 +613,7 @@ module Context = struct
           ; fdo_target_exe = None
           ; dynamically_linked_foreign_archives = true
           ; instrument_with = Option.value instrument_with ~default:[]
-          ; merlin = false
+          ; merlin = Not_selected
           }
       }
   ;;
@@ -446,38 +633,56 @@ end
 type t =
   { merlin_context : Context_name.t option
   ; contexts : Context.t list
-  ; env : Dune_env.Stanza.t option
+  ; env : Dune_env.t option
   ; config : Dune_config.t
   ; repos : Dune_pkg.Pkg_workspace.Repository.t list
+  ; lock_dirs : Lock_dir.t list
+  ; dir : Path.Source.t
+  ; pins : Dune_pkg.Pin_stanza.DB.Workspace.t
   }
 
-let to_dyn { merlin_context; contexts; env; config; repos } =
+let to_dyn { merlin_context; contexts; env; config; repos; lock_dirs; pins; dir } =
   let open Dyn in
   record
     [ "merlin_context", option Context_name.to_dyn merlin_context
     ; "contexts", list Context.to_dyn contexts
-    ; "env", option Dune_env.Stanza.to_dyn env
+    ; "env", option Dune_env.to_dyn env
     ; "config", Dune_config.to_dyn config
     ; "repos", list Repository.to_dyn repos
+    ; "solver", (list Lock_dir.to_dyn) lock_dirs
+    ; "dir", Path.Source.to_dyn dir
+    ; "pins", Dune_pkg.Pin_stanza.DB.Workspace.to_dyn pins
     ]
 ;;
 
-let equal { merlin_context; contexts; env; config; repos } w =
+let equal { merlin_context; contexts; env; config; repos; lock_dirs; dir; pins } w =
   Option.equal Context_name.equal merlin_context w.merlin_context
   && List.equal Context.equal contexts w.contexts
-  && Option.equal Dune_env.Stanza.equal env w.env
+  && Option.equal Dune_env.equal env w.env
   && Dune_config.equal config w.config
   && List.equal Repository.equal repos w.repos
+  && List.equal Lock_dir.equal lock_dirs w.lock_dirs
+  && Path.Source.equal dir w.dir
+  && Dune_pkg.Pin_stanza.DB.Workspace.equal pins w.pins
 ;;
 
-let hash { merlin_context; contexts; env; config; repos } =
+let hash { merlin_context; contexts; env; config; repos; lock_dirs; dir; pins } =
   Poly.hash
     ( Option.hash Context_name.hash merlin_context
     , List.hash Context.hash contexts
-    , Option.hash Dune_env.Stanza.hash env
+    , Option.hash Dune_env.hash env
     , Dune_config.hash config
-    , List.hash Repository.hash repos )
+    , List.hash Repository.hash repos
+    , List.hash Lock_dir.hash lock_dirs
+    , Path.Source.hash dir
+    , Dune_pkg.Pin_stanza.DB.Workspace.hash pins )
 ;;
+
+let find_lock_dir t path =
+  List.find t.lock_dirs ~f:(fun lock_dir -> Path.Source.equal lock_dir.path path)
+;;
+
+let add_repo t repo = { t with repos = repo :: t.repos }
 
 include Dune_lang.Versioned_file.Make (struct
     type t = unit
@@ -600,12 +805,24 @@ let step1 clflags =
   let { Clflags.x
       ; profile = cl_profile
       ; instrument_with = cl_instrument_with
-      ; workspace_file = _
+      ; workspace_file
       ; config_from_command_line
       ; config_from_config_file
       }
     =
     clflags
+  in
+  let dir =
+    match workspace_file with
+    | None -> Path.Source.root
+    | Some file ->
+      (match Path.Outside_build_dir.parent file with
+       | None -> assert false
+       | Some (External _) ->
+         (* CR-rgrinberg: not really correct, but we don't support lock
+            directories outside the workspace (for now) *)
+         Path.Source.root
+       | Some (In_source_dir s) -> s)
   in
   let x = Option.map x ~f:(fun s -> Context.Target.Named s) in
   let superpose_with_command_line cl field =
@@ -626,7 +843,9 @@ let step1 clflags =
          "instrument_with"
          (lazy_ (Dune_lang.Syntax.since Stanza.syntax (2, 7) >>> repeat Lib_name.decode))
          ~default:(lazy []))
-  and+ config_from_workspace_file = Dune_config.decode_fields_of_workspace_file in
+  and+ config_from_workspace_file = Dune_config.decode_fields_of_workspace_file
+  and+ lock_dirs = multi_field "lock_dir" (Lock_dir.decode ~dir)
+  and+ pins = Dune_pkg.Pin_stanza.DB.Workspace.decode in
   let+ contexts = multi_field "context" (lazy_ Context.decode) in
   let config =
     create_final_config
@@ -648,7 +867,7 @@ let step1 clflags =
        in
        let defined_names = ref Context_name.Set.empty in
        let env = Lazy.force env in
-       let repos = Repository.default :: List.map ~f:Lazy.force repos in
+       let repos = default_repositories @ List.map ~f:Lazy.force repos in
        let merlin_context =
          List.fold_left contexts ~init:None ~f:(fun acc ctx ->
            let name = Context.name ctx in
@@ -661,15 +880,15 @@ let step1 clflags =
                    (Context_name.to_string name)
                ];
            defined_names
-             := Context_name.Set.union
-                  !defined_names
-                  (Context_name.Set.of_list (Context.all_names ctx));
+           := Context_name.Set.union
+                !defined_names
+                (Context_name.Set.of_list (Context.all_names ctx));
            match Context.base ctx, acc with
-           | { merlin = true; _ }, Some _ ->
+           | { merlin = Selected; _ }, Some _ ->
              User_error.raise
                ~loc:(Context.loc ctx)
                [ Pp.text "you can only have one context for merlin" ]
-           | { merlin = true; _ }, None -> Some name
+           | { merlin = Selected; _ }, None -> Some name
            | _ -> acc)
        in
        let contexts =
@@ -692,7 +911,15 @@ let step1 clflags =
            then Some Context_name.default
            else None
        in
-       { merlin_context; contexts = top_sort (List.rev contexts); env; config; repos })
+       { merlin_context
+       ; contexts = top_sort (List.rev contexts)
+       ; env
+       ; config
+       ; repos
+       ; lock_dirs
+       ; dir
+       ; pins
+       })
   in
   { Step1.t; config }
 ;;
@@ -721,7 +948,10 @@ let default clflags =
   ; contexts = [ Context.default ~x ~profile ~instrument_with ]
   ; env = None
   ; config
-  ; repos = [ Repository.default ]
+  ; repos = default_repositories
+  ; lock_dirs = []
+  ; dir = Path.Source.root
+  ; pins = Dune_pkg.Pin_stanza.DB.Workspace.empty
   }
 ;;
 
@@ -754,13 +984,13 @@ let workspace_step1 =
       | Some p ->
         Fs_memo.file_exists p
         >>| (function
-        | true -> Some p
-        | false ->
-          User_error.raise
-            [ Pp.textf
-                "Workspace file %s does not exist"
-                (Path.Outside_build_dir.to_string_maybe_quoted p)
-            ])
+         | true -> Some p
+         | false ->
+           User_error.raise
+             [ Pp.textf
+                 "Workspace file %s does not exist"
+                 (Path.Outside_build_dir.to_string_maybe_quoted p)
+             ])
     in
     let clflags = { clflags with workspace_file } in
     match workspace_file with

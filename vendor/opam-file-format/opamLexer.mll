@@ -86,14 +86,24 @@ module HS =
   Weak.Make(struct include String let hash = Hashtbl.hash let equal = (=) end)
 let hm = HS.create 317
 
+let buf = Buffer.create 64
+let m = Mutex.create ()
 
 let buffer_rule r lb =
   let pos = lb.Lexing.lex_start_p in
-  let b = Buffer.create 64 in
-  r b lb ;
-  (* buffer start position, instead of last lexem position *)
-  lb.Lexing.lex_start_p <- pos;
-  HS.merge hm (Buffer.contents b)
+  Mutex.lock m;
+  Buffer.clear buf;
+  try
+    r buf lb ;
+    (* buffer start position, instead of last lexem position *)
+    lb.Lexing.lex_start_p <- pos;
+    let contents = Buffer.contents buf in
+    Mutex.unlock m;
+    HS.merge hm contents
+  with
+  e ->
+    Mutex.unlock m;
+    raise e
 }
 
 let eol = '\r'? '\n'
@@ -150,6 +160,7 @@ rule token = parse
 
 and string b = parse
 | '\"'    { () }
+| [^ '\\' '"' '\r' '\n']+ as s { Buffer.add_string b s; string b lexbuf }
 | eol     { newline lexbuf ;
             Buffer.add_char b '\n'            ; string b lexbuf }
 | '\\'    { (match escape lexbuf with
@@ -161,6 +172,7 @@ and string b = parse
 
 and string_triple b = parse
 | "\"\"\""    { () }
+| [^ '\\' '"' '\r' '\n']+ as s { Buffer.add_string b s; string_triple b lexbuf }
 | eol     { newline lexbuf ;
             Buffer.add_char b '\n'            ; string_triple b lexbuf }
 | '\\'    { (match escape lexbuf with

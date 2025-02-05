@@ -49,12 +49,12 @@ let%expect_test "with-outputs-to" =
     ( Action.Outputs.Outputs
     , "foo"
     , Action.File_perm.Normal
-    , Progn [ Bash "first sometinhg"; Bash "then"; Bash "echo Hello world" ] )
+    , Progn [ Bash "first something"; Bash "then"; Bash "echo Hello world" ] )
   |> print;
   [%expect
     {|
     {
-      bash -e -u -o pipefail -c 'first sometinhg';
+      bash -e -u -o pipefail -c 'first something';
       bash -e -u -o pipefail -c then;
       bash -e -u -o pipefail -c 'echo Hello world';
     } &> foo |}]
@@ -177,52 +177,10 @@ let%expect_test "copy" =
     cp foo bar |}]
 ;;
 
-let%expect_test "system" =
-  System "foo bar baz" |> print;
-  [%expect {|
-    foo bar baz |}]
-;;
-
 let%expect_test "bash" =
   Bash "echo Hello world" |> print;
   [%expect {|
     bash -e -u -o pipefail -c 'echo Hello world' |}]
-;;
-
-let%expect_test "diff" =
-  Diff
-    { Action.Diff.optional = false
-    ; file1 = "foo"
-    ; file2 = "bar"
-    ; mode = Action.Diff.Mode.Text
-    }
-  |> print;
-  [%expect {|
-    diff foo bar |}]
-;;
-
-let%expect_test "diff optional" =
-  Diff
-    { Action.Diff.optional = true
-    ; file1 = "foo"
-    ; file2 = "bar"
-    ; mode = Action.Diff.Mode.Text
-    }
-  |> print;
-  [%expect {|
-    test ! -e file1 -o ! -e file2 || diff foo bar |}]
-;;
-
-let%expect_test "cmp" =
-  Diff
-    { Action.Diff.optional = false
-    ; file1 = "foo"
-    ; file2 = "bar"
-    ; mode = Action.Diff.Mode.Binary
-    }
-  |> print;
-  [%expect {|
-    cmp foo bar |}]
 ;;
 
 (* cmping a binary file in optional mode is not supported *)

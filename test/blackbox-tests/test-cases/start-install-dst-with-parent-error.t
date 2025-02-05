@@ -28,7 +28,7 @@ Test that we get a warning if `(files ...)` has a dst starting with "..":
   beginning with .. will be disallowed to prevent a package's installed files
   from escaping that package's install directories.
   Hint: To disable this warning, add the following to your dune-project file:
-  (escaping_paths_in_install_stanza disabled)
+  (warnings (escaping_paths_in_install_stanza disabled))
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
@@ -56,7 +56,7 @@ Test that we get a warning if `(dirs ...)` has a dst starting with "..":
   beginning with .. will be disallowed to prevent a package's installed files
   from escaping that package's install directories.
   Hint: To disable this warning, add the following to your dune-project file:
-  (escaping_paths_in_install_stanza disabled)
+  (warnings (escaping_paths_in_install_stanza disabled))
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
@@ -84,7 +84,7 @@ Test that we get a warning if `(dirs ...)` has a dst that is exactly "..":
   with .. will be disallowed to prevent a package's installed files from
   escaping that package's install directories.
   Hint: To disable this warning, add the following to your dune-project file:
-  (escaping_paths_in_install_stanza disabled)
+  (warnings (escaping_paths_in_install_stanza disabled))
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
@@ -109,7 +109,7 @@ Test that we get get a warning if the ".." is the result of variable expansion:
   beginning with .. will be disallowed to prevent a package's installed files
   from escaping that package's install directories.
   Hint: To disable this warning, add the following to your dune-project file:
-  (escaping_paths_in_install_stanza disabled)
+  (warnings (escaping_paths_in_install_stanza disabled))
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
@@ -165,7 +165,7 @@ Test that we get a warning if the ".." comes from the prefix of a glob:
   stanzas beginning with .. will be disallowed to prevent a package's installed
   files from escaping that package's install directories.
   Hint: To disable this warning, add the following to your dune-project file:
-  (escaping_paths_in_install_stanza disabled)
+  (warnings (escaping_paths_in_install_stanza disabled))
   lib: [
     "_build/install/default/lib/foo/META"
     "_build/install/default/lib/foo/dune-package"
@@ -209,7 +209,7 @@ Test that on older versions of dune we don't get warnings in this case:
   ]
   etc: [
     "_build/install/default/etc/b" {"../b"}
-    "_build/install/default/etc/baz/baz.txt" {"../baz/baz.txt"}
+    "_build/install/default/etc/baz/b.txt" {"../baz/b.txt"}
   ]
 
 Test that we don't get the warning if a vendored project starts an install dst

@@ -102,7 +102,12 @@ module Parse = struct
   let with_include ~elt =
     generic
       ~elt
-      ~inc:(sum [ (":include", String_with_vars.decode >>| fun s -> Include s) ])
+      ~inc:
+        (sum
+           [ ( ":include"
+             , let+ s = String_with_vars.decode in
+               Include s )
+           ])
   ;;
 
   let without_include ~elt =
@@ -233,6 +238,7 @@ module Unexpanded = struct
   type ast = (String_with_vars.t, Ast.unexpanded) Ast.t
   type t = ast generic
 
+  let loc t = t.loc
   let equal x y = equal_generic (Ast.equal String_with_vars.equal_no_loc) x y
 
   let decode : t Decoder.t =
@@ -240,7 +246,10 @@ module Unexpanded = struct
     let+ context = get_all
     and+ loc, ast =
       located
-        (Parse.with_include ~elt:(String_with_vars.decode >>| fun s -> Ast.Element s))
+        (Parse.with_include
+           ~elt:
+             (let+ s = String_with_vars.decode in
+              Ast.Element s))
     in
     { ast; loc = Some loc; context }
   ;;
@@ -279,25 +288,56 @@ module Unexpanded = struct
     }
   ;;
 
-  let field ?check name =
+  let is_expanded t =
+    let rec loop (t : ast) =
+      let open Ast in
+      match t with
+      | Standard -> true
+      | Include _ -> false
+      | Element s -> Option.is_some (String_with_vars.text_only s)
+      | Union l -> List.for_all l ~f:loop
+      | Diff (l, r) -> loop l && loop r
+    in
+    loop t.ast
+  ;;
+
+  let field_gen field ?check ?since_expanded is_expanded =
     let decode =
       match check with
       | None -> decode
       | Some x -> Decoder.( >>> ) x decode
     in
-    Decoder.field name decode ~default:standard
+    let x = field decode in
+    match since_expanded with
+    | None -> x
+    | Some since_expanded ->
+      let open Decoder in
+      let+ loc, x = located x
+      and+ ver = Syntax.get_exn Stanza.syntax in
+      if ver < since_expanded && not (is_expanded x)
+      then
+        Syntax.Error.since
+          loc
+          Stanza.syntax
+          since_expanded
+          ~what:"the ability to specify non-constant module lists";
+      x
   ;;
 
-  let has_special_forms t =
-    let rec loop (t : ast) =
-      let open Ast in
-      match t with
-      | Standard | Include _ -> true
-      | Element _ -> false
-      | Union l -> List.exists l ~f:loop
-      | Diff (l, r) -> loop l || loop r
-    in
-    loop t.ast
+  let field ?check ?since_expanded name =
+    field_gen
+      (Decoder.field name ~default:standard ?on_dup:None)
+      ?check
+      ?since_expanded
+      is_expanded
+  ;;
+
+  let field_o ?check ?since_expanded name =
+    field_gen
+      (Decoder.field_o name ?on_dup:None)
+      ?check
+      ?since_expanded
+      (Option.forall ~f:is_expanded)
   ;;
 
   let has_standard t =
@@ -359,7 +399,13 @@ module Unexpanded = struct
             let* sexp =
               let* path = expand_template fn ~mode:Single in
               let path = Value.to_path path ?error_loc:(Some loc) ~dir in
-              Action_builder.read_sexp path
+              Action_builder.push_stack_frame
+                ~human_readable_description:(fun () ->
+                  Pp.textf
+                    "(:include %s) at %s"
+                    (Path.to_string path)
+                    (Loc.to_file_colon_line loc))
+                (fun () -> Action_builder.read_sexp path)
             in
             let t = Decoder.parse decode context sexp in
             expand t.ast ~allow_include:false
