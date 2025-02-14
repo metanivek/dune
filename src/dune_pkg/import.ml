@@ -13,12 +13,12 @@ end
 
 include struct
   open Dune_lang
-  module Package_name = Package_name
   module Action = Action
   module String_with_vars = String_with_vars
   module Pform = Pform
   module Blang = Blang
   module Slang = Slang
+  module Package_variable_name = Package_variable_name
 end
 
 include struct
@@ -26,3 +26,5 @@ include struct
   module Process = Process
   module Display = Display
 end
+
+module OpamUrl = OpamUrl0

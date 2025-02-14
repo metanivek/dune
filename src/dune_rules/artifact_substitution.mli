@@ -13,8 +13,8 @@ type t =
   | Configpath of configpath
   | Hardcoded_ocaml_path
   | Repeat of int * string
-      (** [Repeat (n, s)] evaluates to [s] repeated [n] times. This substitution
-          is used for unit tests. *)
+  (** [Repeat (n, s)] evaluates to [s] repeated [n] times. This substitution
+      is used for unit tests. *)
 
 type hardcoded_ocaml_path =
   | Hardcoded of Path.t list
@@ -53,7 +53,6 @@ val decode : string -> t option
     and then atomically renamed to [dst]. *)
 val copy_file
   :  conf:Conf.t
-  -> ?executable:bool
   -> ?chmod:(int -> int)
   -> ?delete_dst_if_it_is_a_directory:bool
   -> src:Path.t

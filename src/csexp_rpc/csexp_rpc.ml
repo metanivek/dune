@@ -61,7 +61,7 @@ module Socket = struct
          else if Sys.unix
          then (module Unix)
          else (module Fail)
-        : Unix_socket)
+      : Unix_socket)
 
   let max_len = 104 (* 108 on some systems but we keep it conservative *)
 
@@ -298,7 +298,7 @@ module Session = struct
          (match error with
           | `Cancelled -> ()
           | `Exn exn ->
-            Dune_console.print [ Pp.textf "Rpc Cilent disconnected"; Exn.pp exn ]);
+            Dune_console.print [ Pp.textf "Rpc Client disconnected"; Exn.pp exn ]);
          let+ () = close t in
          Error `Closed)
   ;;

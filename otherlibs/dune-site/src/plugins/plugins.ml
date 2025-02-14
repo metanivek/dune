@@ -1,11 +1,22 @@
 open Dune_site.Private_
 module Data = Dune_site_plugins_data
 
-let readdir dirs =
-  List.concat
-    (List.map
-       (fun dir -> Array.to_list (Sys.readdir dir))
-       (List.filter Sys.file_exists dirs))
+let meta_fn = "META"
+
+let readdir =
+  let ( / ) = Filename.concat in
+  let readdir_noexn dir =
+    try Sys.readdir dir with
+    | Sys_error _ -> [||]
+  in
+  fun dirs ->
+    List.concat
+      (List.map
+         (fun dir ->
+            List.filter
+              (fun entry -> Sys.file_exists (dir / entry / meta_fn))
+              (Array.to_list (readdir_noexn dir)))
+         dirs)
 ;;
 
 let rec lookup dirs file =
@@ -208,8 +219,6 @@ let load file ~pkg =
   { Meta_parser.name = Some pkg; entries }
 ;;
 
-let meta_fn = "META"
-
 let lookup_and_load_one_dir ~dir ~pkg =
   let meta_file = Filename.concat dir meta_fn in
   if Sys.file_exists meta_file
@@ -234,9 +243,9 @@ let lookup_and_summarize alldirs name =
     | [] ->
       List.assoc_opt pkg Data.builtin_library
       |> (function
-      | None -> raise (Library_not_found { search_paths = alldirs; prefix = []; name })
-      | Some meta ->
-        find_plugin ~dirs:alldirs ~dir:(Lazy.force Helpers.stdlib) ~suffix meta)
+       | None -> raise (Library_not_found { search_paths = alldirs; prefix = []; name })
+       | Some meta ->
+         find_plugin ~dirs:alldirs ~dir:(Lazy.force Helpers.stdlib) ~suffix meta)
     | dir :: dirs ->
       let dir = Filename.concat dir pkg in
       (match lookup_and_load_one_dir ~dir ~pkg with
@@ -264,8 +273,8 @@ let load_gen ~load_requires dirs name =
     List.iter load_requires requires;
     List.iter
       (fun p ->
-        let file = Filename.concat directory p in
-        Dune_site_backend.Linker.load file)
+         let file = Filename.concat directory p in
+         Dune_site_backend.Linker.load file)
       plugins)
 ;;
 

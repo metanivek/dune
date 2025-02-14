@@ -9,7 +9,7 @@ type t
     collection of [packages] by consulting the [repos] and [local_packages].*)
 val find
   :  repos:Opam_repo.t list
-  -> local_packages:Opam_repo.With_file.t Package_name.Map.t
+  -> local_packages:Dune_pkg.Local_package.t Package_name.Map.t
   -> Lock_dir.Pkg.t Package_name.Map.t
   -> t Fiber.t
 
@@ -17,7 +17,7 @@ val find
     explaining the outdated packages. It begins with a summary detailing the number of
     affected packages and then lists all the packages requested.
 
-    - [transitive] indiciates whether to hint that transitive dependencies are not being
+    - [transitive] indicates whether to hint that transitive dependencies are not being
       shown and therefore the user should pass [--transitive] to the [dune pkg outdated]
       command to see them.
 

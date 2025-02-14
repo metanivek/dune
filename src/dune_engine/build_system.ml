@@ -1,6 +1,5 @@
 open Import
 open Memo.O
-module Action_builder = Action_builder0
 module Error = Build_system_error
 
 module Progress = struct
@@ -11,8 +10,8 @@ module Progress = struct
     }
 
   let equal
-    { number_of_rules_discovered; number_of_rules_executed; number_of_rules_failed }
-    t
+        { number_of_rules_discovered; number_of_rules_executed; number_of_rules_failed }
+        t
     =
     Int.equal number_of_rules_discovered t.number_of_rules_discovered
     && Int.equal number_of_rules_executed t.number_of_rules_executed
@@ -121,8 +120,8 @@ end
 let () = Hooks.End_of_build.always Metrics.reset
 
 type rule_execution_result =
-  { deps : Dep.Fact.t Dep.Map.t
-  ; targets : Digest.t Path.Build.Map.t
+  { facts : Dep.Fact.t Dep.Map.t
+  ; targets : Digest.t Targets.Produced.t
   }
 
 module type Rec = sig
@@ -131,9 +130,9 @@ module type Rec = sig
   val build_alias : Alias.t -> Dep.Fact.Files.t Memo.t
 
   val build_file : Path.t -> Digest.t Memo.t
-  val build_dir : Path.t -> (Digest.t * Digest.t Path.Build.Map.t) Memo.t
+  val build_dir : Path.t -> Digest.t Targets.Produced.t Memo.t
+  val build_dep : Dep.t -> Dep.Fact.t Memo.t
   val build_deps : Dep.Set.t -> Dep.Facts.t Memo.t
-  val eval_deps : 'a Action_builder.eval_mode -> Dep.Set.t -> 'a Dep.Map.t Memo.t
   val execute_rule : Rule.t -> rule_execution_result Memo.t
 
   val execute_action
@@ -146,10 +145,7 @@ module type Rec = sig
     -> Rule.Anonymous_action.t
     -> string Memo.t
 
-  module Pred : sig
-    val eval : File_selector.t -> Path.Set.t Memo.t
-    val build : File_selector.t -> Dep.Fact.Files.t Memo.t
-  end
+  val eval_pred : File_selector.t -> Filename_set.t Memo.t
 end
 
 (* Separation between [Used_recursively] and [Exported] is necessary because at
@@ -164,7 +160,7 @@ and Exported : sig
 
   type target_kind =
     | File_target
-    | Dir_target of { generated_file_digests : Digest.t Path.Build.Map.t }
+    | Dir_target of { targets : Digest.t Targets.Produced.t }
 
   (* The below two definitions are useless, but if we remove them we get an
      "Undefined_recursive_module" exception. *)
@@ -177,6 +173,31 @@ and Exported : sig
 end = struct
   open Used_recursively
 
+  let file_selector_stack_frame_description file_selector =
+    Pp.concat [ Pp.text (File_selector.to_dyn file_selector |> Dyn.to_string) ]
+  ;;
+
+  let build_file_selector : File_selector.t -> Dep.Fact.t Memo.t =
+    let impl file_selector =
+      let* files = eval_pred file_selector in
+      let+ fact = Dep.Fact.Files.create files ~build_file in
+      (* Fact: [file_selector] expands to the set of [files] whose digests are captured
+         via [build_file]; also, the [File_selector.dir] exists (though it may be empty) *)
+      Dep.Fact.file_selector file_selector fact
+    in
+    let memo =
+      Memo.create
+        "build_file_selector"
+        ~input:(module File_selector)
+        ~cutoff:Dep.Fact.equal
+          (* CR-someday amokhov: Pass [file_selector_stack_frame_description] here to
+             include globs into stack traces. *)
+        ?human_readable_description:None
+        impl
+    in
+    fun file_selector -> Memo.exec memo file_selector
+  ;;
+
   (* [build_dep] turns a [Dep.t] which is a description of a dependency into a
      fact about the world. To do that, it needs to do some building. *)
   let build_dep : Dep.t -> Dep.Fact.t Memo.t = function
@@ -185,14 +206,11 @@ end = struct
       (* Fact: alias [a] expands to the set of file-digest pairs [digests] *)
       Dep.Fact.alias a digests
     | File f ->
+      (* Not necessarily a file, can also be a directory. *)
       let+ digest = build_file f in
       (* Fact: file [f] has digest [digest] *)
       Dep.Fact.file f digest
-    | File_selector g ->
-      let+ digests = Pred.build g in
-      (* Fact: file selector [g] expands to the set of file- and (possibly)
-         dir-digest pairs [digests] *)
-      Dep.Fact.file_selector g digests
+    | File_selector file_selector -> build_file_selector file_selector
     | Universe | Env _ ->
       (* Facts about these dependencies are constructed in
          [Dep.Facts.digest]. *)
@@ -200,13 +218,6 @@ end = struct
   ;;
 
   let build_deps deps = Dep.Map.parallel_map deps ~f:(fun dep () -> build_dep dep)
-
-  let eval_deps : type a. a Action_builder.eval_mode -> Dep.Set.t -> a Dep.Map.t Memo.t =
-    fun mode deps ->
-    match mode with
-    | Lazy -> Memo.return deps
-    | Eager -> build_deps deps
-  ;;
 
   let select_sandbox_mode (config : Sandbox_config.t) ~loc ~sandboxing_preference =
     (* Rules with (mode patch-back-source-tree) are special and are not affected
@@ -235,14 +246,14 @@ end = struct
 
   (* The current version of the rule digest scheme. We should increment it when
      making any changes to the scheme, to avoid collisions. *)
-  let rule_digest_version = 19
+  let rule_digest_version = 22
 
   let compute_rule_digest
-    (rule : Rule.t)
-    ~deps
-    ~action
-    ~sandbox_mode
-    ~execution_parameters
+        (rule : Rule.t)
+        ~facts
+        ~action
+        ~sandbox_mode
+        ~execution_parameters
     =
     let { Action.Full.action
         ; env
@@ -253,17 +264,15 @@ end = struct
       =
       action
     in
-    let file_targets =
-      Path.Build.Set.to_list_map rule.targets.files ~f:Path.Build.to_string
-    in
-    let dir_targets =
-      Path.Build.Set.to_list_map rule.targets.dirs ~f:Path.Build.to_string
+    let target_paths names =
+      Filename.Set.to_list_map names ~f:(fun name ->
+        Path.Build.relative rule.targets.root name |> Path.Build.to_string)
     in
     let trace =
       ( rule_digest_version (* Update when changing the rule digest scheme. *)
       , sandbox_mode
-      , Dep.Facts.digest deps ~env
-      , file_targets @ dir_targets
+      , Dep.Facts.digest facts ~env
+      , target_paths rule.targets.files @ target_paths rule.targets.dirs
       , Action.for_shell action
       , can_go_in_shared_cache
       , List.map locks ~f:Path.to_string
@@ -307,16 +316,24 @@ end = struct
         ; attached_to_alias : bool
         }
 
+  let maybe_async_rule_file_op f =
+    (* It would be nice to do this check only once and return a function, but the
+       type of this function would need to be polymorphic which is forbidden by
+       the relaxed value restriction. *)
+    match Config.(get background_file_system_operations_in_rule_execution) with
+    | `Enabled -> Scheduler.async_exn f
+    | `Disabled -> Fiber.return (f ())
+  ;;
+
   let execute_action_for_rule
-    ~rule_kind
-    ~rule_digest
-    ~action
-    ~deps
-    ~loc
-    ~execution_parameters
-    ~sandbox_mode
-    ~dir
-    ~(targets : Targets.Validated.t)
+        ~rule_kind
+        ~rule_digest
+        ~action
+        ~facts
+        ~loc
+        ~execution_parameters
+        ~sandbox_mode
+        ~(targets : Targets.Validated.t)
     : Exec_result.t Fiber.t
     =
     let open Fiber.O in
@@ -324,19 +341,24 @@ end = struct
       action
     in
     let* dune_stats = Scheduler.stats () in
+    let deps =
+      Dep.Facts.paths
+        ~expand_aliases:
+          (Execution_parameters.expand_aliases_in_sandbox execution_parameters)
+        facts
+    in
     let* sandbox =
       match sandbox_mode with
       | Some mode ->
         let+ sandbox =
           Sandbox.create
             ~mode
+            ~dirs:(Dep.Facts.necessary_dirs_for_sandboxing facts)
             ~deps
-            ~rule_dir:dir
+            ~rule_dir:targets.root
             ~rule_loc:loc
             ~rule_digest
             ~dune_stats
-            ~expand_aliases:
-              (Execution_parameters.expand_aliases_in_sandbox execution_parameters)
         in
         Some sandbox
       | None ->
@@ -363,11 +385,11 @@ end = struct
         else Action.progn [ action; Action.write_file stamp_file "" ]
     in
     let* () =
-      Targets.maybe_async (fun () ->
+      maybe_async_rule_file_op (fun () ->
         Action.chdirs action
         |> Path.Build.Set.iter ~f:(fun p -> Path.mkdir_p (Path.build p)))
     in
-    let context = Build_context.of_build_path dir in
+    let context = Build_context.of_build_path targets.root in
     let root =
       match context with
       | None -> Path.Build.root
@@ -387,50 +409,53 @@ end = struct
           Pending_targets.remove targets;
           Fiber.return ())
       (fun () ->
-        with_locks locks ~f:(fun () ->
-          let build_deps deps = Memo.run (build_deps deps) in
-          let* action_exec_result =
-            let input =
-              { Action_exec.root
-              ; context (* can be derived from the root *)
-              ; env
-              ; targets = Some targets
-              ; rule_loc = loc
-              ; execution_parameters
-              ; action
-              }
-            in
-            match (Build_config.get ()).action_runner input with
-            | None -> Action_exec.exec input ~build_deps
-            | Some runner -> Action_runner.exec_action runner input
-          in
-          let* action_exec_result = Action_exec.Exec_result.ok_exn action_exec_result in
-          let+ produced_targets =
-            match sandbox with
-            | None -> Targets.Produced.produced_after_rule_executed_exn ~loc targets
-            | Some sandbox ->
-              (* The stamp file for anonymous actions is always created outside
+         with_locks locks ~f:(fun () ->
+           let* action_exec_result =
+             let input =
+               { Action_exec.root
+               ; context (* can be derived from the root *)
+               ; env
+               ; targets = Some targets
+               ; rule_loc = loc
+               ; execution_parameters
+               ; action
+               }
+             in
+             let build_deps deps = Memo.run (build_deps deps) in
+             Action_exec.exec input ~build_deps
+           in
+           let* action_exec_result = Action_exec.Exec_result.ok_exn action_exec_result in
+           let* () =
+             match sandbox with
+             | None -> Fiber.return ()
+             | Some sandbox ->
+               (* The stamp file for anonymous actions is always created outside
                  the sandbox, so we can't move it. *)
-              let should_be_skipped =
-                match rule_kind with
-                | Normal_rule -> fun (_ : Path.Build.t) -> false
-                | Anonymous_action { stamp_file; _ } -> Path.Build.equal stamp_file
-              in
-              Sandbox.move_targets_to_build_dir sandbox ~loc ~should_be_skipped ~targets
-          in
-          { Exec_result.produced_targets; action_exec_result }))
+               let should_be_skipped =
+                 match rule_kind with
+                 | Normal_rule -> fun (_ : Path.Build.t) -> false
+                 | Anonymous_action { stamp_file; _ } -> Path.Build.equal stamp_file
+               in
+               Sandbox.move_targets_to_build_dir sandbox ~should_be_skipped ~targets
+           in
+           let+ produced_targets =
+             maybe_async_rule_file_op (fun () -> Targets.Produced.of_validated targets)
+           in
+           match produced_targets with
+           | Ok produced_targets -> { Exec_result.produced_targets; action_exec_result }
+           | Error error -> User_error.raise ~loc (Targets.Produced.Error.message error)))
   ;;
 
-  let promote_targets ~rule_mode ~dir ~targets ~promote_source =
+  let promote_targets ~rule_mode ~targets ~promote_source =
     match rule_mode, !Clflags.promote with
     | (Rule.Mode.Standard | Fallback | Ignore_source_files), _ | Promote _, Some Never ->
       Fiber.return ()
     | Promote promote, (Some Automatically | None) ->
-      Target_promotion.promote ~dir ~targets ~promote ~promote_source
+      Target_promotion.promote ~targets ~promote ~promote_source
   ;;
 
   let execute_rule_impl ~rule_kind rule =
-    let { Rule.id = _; targets; dir; mode; action; info = _; loc } = rule in
+    let { Rule.id = _; targets; mode; action; info = _; loc } = rule in
     (* We run [State.start_rule_exn ()] entirely for its side effect, so one
        might be tempted to use [Memo.of_non_reproducible_fiber] here but that is
        wrong, because that would force us to rerun [execute_rule_impl] on every
@@ -438,11 +463,13 @@ end = struct
     let* () = Memo.of_reproducible_fiber (State.start_rule_exn ()) in
     let head_target = Targets.Validated.head targets in
     let* execution_parameters =
-      match Dpath.Target_dir.of_target dir with
+      match Dpath.Target_dir.of_target targets.root with
       | Regular (With_context (_, _)) | Anonymous_action (With_context (_, _)) ->
-        (Build_config.get ()).execution_parameters ~dir
+        (Build_config.get ()).execution_parameters ~dir:targets.root
       | Anonymous_action Root | Regular Root | Invalid _ ->
-        Code_error.raise "invalid dir for rule execution" [ "dir", Path.Build.to_dyn dir ]
+        Code_error.raise
+          "invalid dir for rule execution"
+          [ "dir", Path.Build.to_dyn targets.root ]
     in
     (* Note: we do not run the below in parallel with the above: if we fail to
        compute action execution parameters, we have no use for the action and
@@ -450,7 +477,7 @@ end = struct
        function [(Build_config.get ()).execution_parameters] is likely
        memoized, and the result is not expected to change often, so we do not
        sacrifice too much performance here by executing it sequentially. *)
-    let* action, deps = Action_builder.run action Eager in
+    let* action, facts = Action_builder.evaluate_and_collect_facts action in
     let wrap_fiber f =
       Memo.of_reproducible_fiber
         (if Loc.is_none loc
@@ -467,7 +494,9 @@ end = struct
     wrap_fiber (fun () ->
       let open Fiber.O in
       report_evaluated_rule_exn config;
-      let* () = Targets.maybe_async (fun () -> Path.mkdir_p (Path.build dir)) in
+      let* () =
+        maybe_async_rule_file_op (fun () -> Path.mkdir_p (Path.build targets.root))
+      in
       let is_action_dynamic = Action.is_dynamic action.action in
       let sandbox_mode =
         select_sandbox_mode
@@ -497,15 +526,13 @@ end = struct
           | Anonymous_action a -> a.attached_to_alias
         in
         let force_rerun = !Clflags.force && is_test in
-        force_rerun || Dep.Map.has_universe deps
+        force_rerun || Dep.Map.has_universe facts
       in
       let rule_digest =
-        compute_rule_digest rule ~deps ~action ~sandbox_mode ~execution_parameters
+        compute_rule_digest rule ~facts ~action ~sandbox_mode ~execution_parameters
       in
-      (* CR-someday amokhov: Add support for rules with directory targets. *)
       let can_go_in_shared_cache =
         action.can_go_in_shared_cache
-        && Path.Build.Set.is_empty targets.dirs
         && (not
               (always_rerun
                || is_action_dynamic
@@ -531,21 +558,38 @@ end = struct
           (* Step II. Remove stale targets both from the digest table and from
              the build directory. *)
           let () =
-            Path.Build.Set.iter targets.files ~f:Cached_digest.remove;
-            Path.Build.Set.iter targets.dirs ~f:Cached_digest.remove
+            Targets.Validated.iter
+              targets
+              ~file:Cached_digest.remove
+              ~dir:Cached_digest.remove
           in
           let* () =
-            Targets.maybe_async (fun () ->
-              Path.Build.Set.iter targets.files ~f:Path.Build.unlink_no_err;
-              Path.Build.Set.iter targets.dirs ~f:(fun dir -> Path.rm_rf (Path.build dir)))
+            maybe_async_rule_file_op (fun () ->
+              let remove_target_dir dir = Path.rm_rf (Path.build dir) in
+              let remove_target_file path =
+                match Path.Build.unlink path with
+                | Success -> ()
+                | Does_not_exist -> ()
+                | Is_a_directory ->
+                  (* If target changed from a directory to a file, delete
+                     in anyway. *)
+                  remove_target_dir path
+                | Error exn ->
+                  Log.info
+                    [ Pp.textf
+                        "Error while removing target %s: %s"
+                        (Path.Build.to_string path)
+                        (Printexc.to_string exn)
+                    ]
+              in
+              Targets.Validated.iter
+                targets
+                ~file:remove_target_file
+                ~dir:remove_target_dir)
           in
           let* produced_targets, dynamic_deps_stages =
             (* Step III. Try to restore artifacts from the shared cache. *)
-            Rule_cache.Shared.lookup
-              ~can_go_in_shared_cache
-              ~rule_digest
-              ~targets
-              ~target_dir:rule.dir
+            Rule_cache.Shared.lookup ~can_go_in_shared_cache ~rule_digest ~targets
             >>= function
             | Some produced_targets ->
               (* Rules with dynamic deps can't be stored to the shared cache
@@ -563,11 +607,10 @@ end = struct
                   ~rule_kind
                   ~rule_digest
                   ~action
-                  ~deps
+                  ~facts
                   ~loc
                   ~execution_parameters
                   ~sandbox_mode
-                  ~dir
                   ~targets
               in
               (* Step V. Examine produced targets and store them to the shared
@@ -577,9 +620,12 @@ end = struct
                   ~can_go_in_shared_cache
                   ~loc
                   ~rule_digest
-                  ~execution_parameters
+                  ~should_remove_write_permissions_on_generated_files:
+                    (Execution_parameters
+                     .should_remove_write_permissions_on_generated_files
+                       execution_parameters)
                   ~produced_targets:exec_result.produced_targets
-                  ~action:action.action
+                  ~action:(fun () -> Action.for_shell action.action |> Action_to_sh.pp)
               in
               let dynamic_deps_stages =
                 List.map
@@ -601,7 +647,6 @@ end = struct
       let* () =
         promote_targets
           ~rule_mode:mode
-          ~dir
           ~targets:produced_targets
           ~promote_source:config.promote_source
       in
@@ -610,8 +655,7 @@ end = struct
     (* jeremidimino: We need to include the dependencies discovered while
        running the action here. Otherwise, package dependencies are broken in
        the presence of dynamic actions. *)
-    >>| fun produced_targets ->
-    { deps; targets = Targets.Produced.all_files produced_targets }
+    >>| fun produced_targets -> { facts; targets = produced_targets }
   ;;
 
   module Anonymous_action = struct
@@ -630,8 +674,9 @@ end = struct
     ;;
   end
 
+  (* Returns the action's stdout or the empty string if [capture_stdout = false]. *)
   let execute_action_generic_stage2_impl
-    { Anonymous_action.action = act; deps; capture_stdout; digest }
+        { Anonymous_action.action = act; deps; capture_stdout; digest }
     =
     let target =
       let dir =
@@ -653,14 +698,9 @@ end = struct
         ~info:(if Loc.is_none loc then Internal else From_dune_file loc)
         ~targets:(Targets.File.create target)
         ~mode:Standard
-        (Action_builder.of_thunk
-           { f =
-               (fun mode ->
-                 let+ deps = eval_deps mode deps in
-                 act.action, deps)
-           })
+        (Action_builder.record act.action deps ~f:build_dep)
     in
-    let+ { deps = _; targets = _ } =
+    let+ { facts = _; targets = _ } =
       execute_rule_impl
         rule
         ~rule_kind:
@@ -670,23 +710,25 @@ end = struct
              ; stamp_file = target
              })
     in
-    target
+    if capture_stdout then Io.read_file (Path.build target) else ""
   ;;
 
   let execute_action_generic_stage2_memo =
     Memo.create
       "execute-action"
       ~input:(module Anonymous_action)
-      (* this memo doesn't need cutoff because the input's digests
-         fully determines the returned build path and we already compare the
-         input using this digest *)
+      ~cutoff:String.equal
       execute_action_generic_stage2_impl
   ;;
 
+  (* The current version of the action digest scheme. We should increment it when
+     making any changes to the scheme, to avoid collisions. *)
+  let action_digest_version = 2
+
   let execute_action_generic
-    ~observing_facts
-    (act : Rule.Anonymous_action.t)
-    ~capture_stdout
+        ~observing_facts
+        (act : Rule.Anonymous_action.t)
+        ~capture_stdout
     =
     (* We memoize the execution of anonymous actions, both via the persistent
        mechanism for not re-running build rules between invocations of [dune
@@ -739,7 +781,8 @@ end = struct
         |> Env.Map.to_list
       in
       Digest.generic
-        ( env
+        ( action_digest_version
+        , env
         , Dep.Set.digest deps
         , Action.for_shell action
         , List.map locks ~f:Path.to_string
@@ -761,24 +804,33 @@ end = struct
   ;;
 
   let execute_action ~observing_facts act =
-    let+ _target = execute_action_generic ~observing_facts act ~capture_stdout:false in
+    let+ (_empty_string : string) =
+      execute_action_generic ~observing_facts act ~capture_stdout:false
+    in
     ()
   ;;
 
   let execute_action_stdout ~observing_facts act =
-    let+ target = execute_action_generic ~observing_facts act ~capture_stdout:true in
-    Io.read_file (Path.build target)
+    execute_action_generic ~observing_facts act ~capture_stdout:true
   ;;
 
+  (* CR-soon amokhov: Instead of wrapping the result into a variant, [build_file_impl]
+     could always return [targets : Digest.t Targets.Produced.t], and the latter could
+     provide a way to conveniently check if a specific [path] is a file or a directory,
+     as well as extract its digest when needed. *)
   type target_kind =
     | File_target
-    | Dir_target of { generated_file_digests : Digest.t Path.Build.Map.t }
+    | Dir_target of
+        { targets :
+            (* All targets of the rule which produced the directory target in question. *)
+            Digest.t Targets.Produced.t
+        }
 
   let target_kind_equal a b =
     match a, b with
     | File_target, File_target -> true
-    | Dir_target { generated_file_digests = a }, Dir_target { generated_file_digests = b }
-      -> Path.Build.Map.equal a b ~equal:Digest.equal
+    | Dir_target { targets = a }, Dir_target { targets = b } ->
+      Targets.Produced.equal a b ~equal:Digest.equal
     | File_target, Dir_target _ | Dir_target _, File_target -> false
   ;;
 
@@ -789,18 +841,29 @@ end = struct
     >>= function
     | Source digest -> Memo.return (digest, File_target)
     | Rule (path, rule) ->
-      let+ { deps = _; targets } =
+      let+ { facts = _; targets } =
         Memo.push_stack_frame
           (fun () -> execute_rule rule)
           ~human_readable_description:(fun () ->
             Pp.text (Path.to_string_maybe_quoted (Path.build path)))
       in
-      (match Path.Build.Map.find targets path with
+      (match Targets.Produced.find targets path with
        | Some digest -> digest, File_target
        | None ->
+         (* CR-soon amokhov: Here we expect [path] to be a directory target. It seems odd
+            to compute its digest here by calling to [Cached_digest.build_file]. Shouldn't
+            we do that in [execute_rule], like we do for file targets?
+
+            rleshchinskiy: Is this digest ever used? [build_dir] discards it and do we
+            (or should we) ever use [build_file] to build directories? Perhaps this could
+            be split in two memo tables, one for files and one for directories.
+
+            ElectreAAS: a lot of functions are called [build_file] or [create_file]
+            even though they also handle directories, this is expected.
+            Also yes this digest is used by [Exported.build_dep] defined above. *)
          (match Cached_digest.build_file ~allow_dirs:true path with
-          | Ok digest -> digest, Dir_target { generated_file_digests = targets }
-          (* Must be a directory target *)
+          | Ok digest -> digest, Dir_target { targets }
+          (* Must be a directory target. *)
           | Error _ ->
             (* CR-someday amokhov: The most important reason we end up here is
                [No_such_file]. I think some of the outcomes above are impossible
@@ -809,7 +872,9 @@ end = struct
               Path.Build.drop_build_context_exn path |> Path.Source.to_string_maybe_quoted
             in
             let matching_dirs =
-              Path.Build.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
+              Filename.Set.to_list_map rule.targets.dirs ~f:(fun dir ->
+                (* CR-someday rleshchinskiy: This test can probably be simplified. *)
+                let dir = Path.Build.relative rule.targets.root dir in
                 match Path.Build.is_descendant path ~of_:dir with
                 | true -> [ dir ]
                 | false -> [])
@@ -837,19 +902,15 @@ end = struct
               ]))
   ;;
 
-  let dep_on_anonymous_action (x : Rule.Anonymous_action.t Action_builder.t)
-    : _ Action_builder.t
+  let execute_anonymous_action action =
+    let* action, facts = Action_builder.evaluate_and_collect_facts action in
+    execute_action action ~observing_facts:facts
+  ;;
+
+  let dep_on_anonymous_action (action : Rule.Anonymous_action.t Action_builder.t)
+    : unit Action_builder.t
     =
-    Action_builder.of_thunk
-      { f =
-          (fun (type m) (mode : m Action_builder.eval_mode) ->
-            match mode with
-            | Lazy -> Memo.return ((), Dep.Map.empty)
-            | Eager ->
-              let* action, facts = Action_builder.run x Eager in
-              let+ () = execute_action action ~observing_facts:facts in
-              (), Dep.Map.empty)
-      }
+    Action_builder.record_success (Memo.of_thunk_apply execute_anonymous_action action)
   ;;
 
   let dep_on_alias_definition (definition : Rules.Dir_rules.Alias_spec.item) =
@@ -864,99 +925,66 @@ end = struct
       >>= Memo.parallel_map ~f:(fun (loc, definition) ->
         Memo.push_stack_frame
           (fun () ->
-            Action_builder.run (dep_on_alias_definition definition) Eager >>| snd)
+             Action_builder.evaluate_and_collect_facts
+               (dep_on_alias_definition definition)
+             >>| snd)
           ~human_readable_description:(fun () -> Alias.describe alias ~loc))
     in
     Dep.Facts.group_paths_as_fact_files l
   ;;
 
-  module Pred = struct
-    let build_impl g =
-      let dir = File_selector.dir g in
-      Load_rules.load_dir ~dir
-      >>= function
-      | External _ | Source _ | Build _ ->
-        let* paths = Pred.eval g in
-        let+ files =
-          Memo.parallel_map (Path.Set.to_list paths) ~f:(fun p ->
-            let+ d = build_file p in
-            p, d)
-        in
-        Dep.Fact.Files.make ~files:(Path.Map.of_list_exn files) ~dirs:Path.Map.empty
-      | Build_under_directory_target _ ->
-        let* digest, path_map = build_dir dir in
-        let files =
-          Path.Build.Map.foldi path_map ~init:Path.Map.empty ~f:(fun path digest acc ->
-            let parent = Path.Build.parent_exn path |> Path.build in
-            let path = Path.build path in
-            match Path.equal parent dir && File_selector.test g path with
-            | true -> Path.Map.add_exn acc path digest
-            | false -> acc)
-        in
-        let dirs = Path.Map.singleton dir digest in
-        Memo.return (Dep.Fact.Files.make ~files ~dirs)
-    ;;
+  let eval_pred_impl g =
+    let dir = File_selector.dir g in
+    (* CR-soon amokhov: Change [Load_rules.load_dir] to return [Filename_set.t]s to save
+       a bunch of set/list operations and reduce code duplication. *)
+    Load_rules.load_dir ~dir
+    >>= function
+    | Source { filenames } | External { filenames } ->
+      Filename_set.create ~dir ~filter:(File_selector.test_basename g) filenames
+      |> Memo.return
+    | Build { rules_here; _ } ->
+      let only_generated_files = File_selector.only_generated_files g in
+      (* We look only at [by_file_targets] because [File_selector] does not
+         match directories. *)
+      Path.Build.Map.foldi
+        ~init:[]
+        rules_here.by_file_targets
+        ~f:(fun path { Rule.info; _ } acc ->
+          match info with
+          | Rule.Info.Source_file_copy _ when only_generated_files -> acc
+          | _ ->
+            let basename = Path.Build.basename path in
+            if File_selector.test_basename g ~basename then basename :: acc else acc)
+      |> Filename.Set.of_list
+      |> Filename_set.create ~dir
+      |> Memo.return
+    | Build_under_directory_target { directory_target_ancestor = _ } ->
+      (* To evaluate a glob in a generated directory, we have no choice but to build the
+         whole directory and examine its contents. *)
+      let+ path_map = build_dir dir in
+      (match Targets.Produced.find_dir path_map (Path.as_in_build_dir_exn dir) with
+       | Some files_and_digests ->
+         Filename_set.create
+           ~dir
+           ~filter:(File_selector.test_basename g)
+           (Filename.Set.of_keys files_and_digests)
+       | None ->
+         (* CR-soon amokhov: I think this case should be an error. If the directory target
+            doesn't contain the requested dir, we will currently create an empty directory
+            in the sandbox, as if it actually existed. *)
+         Filename_set.empty ~dir)
+  ;;
 
-    let eval_impl g =
-      let dir = File_selector.dir g in
-      Load_rules.load_dir ~dir
-      >>= function
-      | Source { files } ->
-        Path.set_of_source_paths files
-        |> Path.Set.filter ~f:(File_selector.test g)
-        |> Memo.return
-      | External { files } ->
-        Path.set_of_external_paths files
-        |> Path.Set.filter ~f:(File_selector.test g)
-        |> Memo.return
-      | Build { rules_here; _ } ->
-        let only_generated_files = File_selector.only_generated_files g in
-        (* We look only at [by_file_targets] because [File_selector] does not
-           match directories. *)
-        Path.Build.Map.foldi
-          ~init:[]
-          rules_here.by_file_targets
-          ~f:(fun s { Rule.info; _ } acc ->
-            match info with
-            | Rule.Info.Source_file_copy _ when only_generated_files -> acc
-            | _ ->
-              let s = Path.build s in
-              if File_selector.test g s then s :: acc else acc)
-        |> Path.Set.of_list
-        |> Memo.return
-      | Build_under_directory_target _ ->
-        (* To evaluate a glob in a generated directory, we have no choice but to
-           build the whole directory, so we might as well build the
-           predicate. *)
-        let+ fact = Pred.build g in
-        Dep.Fact.Files.paths fact |> Path.Set.of_keys
-    ;;
+  let eval_pred_memo =
+    Memo.create
+      "eval-pred"
+      ~human_readable_description:file_selector_stack_frame_description
+      ~input:(module File_selector)
+      ~cutoff:Filename_set.equal
+      eval_pred_impl
+  ;;
 
-    let eval_memo =
-      Memo.create
-        "eval-pred"
-        ~human_readable_description:(fun glob ->
-          Pp.concat
-            [ Pp.textf
-                "Evaluating predicate in directory %s"
-                (Path.to_string_maybe_quoted (File_selector.dir glob))
-            ])
-        ~input:(module File_selector)
-        ~cutoff:Path.Set.equal
-        eval_impl
-    ;;
-
-    let eval = Memo.exec eval_memo
-
-    let build =
-      Memo.exec
-        (Memo.create
-           "build-pred"
-           ~input:(module File_selector)
-           ~cutoff:Dep.Fact.Files.equal
-           build_impl)
-    ;;
-  end
+  let eval_pred = Memo.exec eval_pred_memo
 
   let build_file_memo =
     lazy
@@ -976,9 +1004,9 @@ end = struct
   let build_file path = Memo.exec (Lazy.force build_file_memo) path >>| fst
 
   let build_dir path =
-    let+ digest, kind = Memo.exec (Lazy.force build_file_memo) path in
+    let+ (_ : Digest.t), kind = Memo.exec (Lazy.force build_file_memo) path in
     match kind with
-    | Dir_target { generated_file_digests } -> digest, generated_file_digests
+    | Dir_target { targets } -> targets
     | File_target ->
       Code_error.raise "build_dir called on a file target" [ "path", Path.to_dyn path ]
   ;;
@@ -1020,9 +1048,6 @@ end
 
 include Exported
 
-let eval_pred = Pred.eval
-let build_pred = Pred.build
-
 (* Here we are doing a O(log |S|) lookup in a set S of files in the build
    directory [dir]. We could memoize these lookups, but it doesn't seem to be
    worth it, since we're unlikely to perform exactly the same lookup many times.
@@ -1034,41 +1059,36 @@ let build_pred = Pred.build
 let file_exists fn =
   Load_rules.load_dir ~dir:(Path.parent_exn fn)
   >>= function
-  | Source { files } ->
-    Memo.return
-      (match Path.as_in_source_tree fn with
-       | None -> false
-       | Some file -> Path.Source.Set.mem files file)
-  | External { files } ->
-    Memo.return
-      (match Path.as_external fn with
-       | None -> false
-       | Some file -> Path.External.Set.mem files file)
+  | Source { filenames } | External { filenames } ->
+    Filename.Set.mem filenames (Path.basename fn) |> Memo.return
   | Build { rules_here; _ } ->
     Memo.return
       (Path.Build.Map.mem rules_here.by_file_targets (Path.as_in_build_dir_exn fn))
   | Build_under_directory_target { directory_target_ancestor } ->
-    let+ _digest, path_map = build_dir (Path.build directory_target_ancestor) in
-    Path.Build.Map.mem path_map (Path.as_in_build_dir_exn fn)
+    let+ path_map = build_dir (Path.build directory_target_ancestor) in
+    (* Note that in the case of directory targets, we also check if directories exist. *)
+    Targets.Produced.mem_any path_map (Path.as_in_build_dir_exn fn)
 ;;
 
 let files_of ~dir =
   Load_rules.load_dir ~dir
   >>= function
-  | Source { files } -> Memo.return (Path.set_of_source_paths files)
-  | External { files } -> Memo.return (Path.set_of_external_paths files)
+  | Source { filenames } | External { filenames } ->
+    Memo.return (Filename_set.create ~dir filenames)
   | Build { rules_here; _ } ->
-    Memo.return
-      (Path.Build.Map.keys rules_here.by_file_targets
-       |> Path.Set.of_list_map ~f:Path.build)
+    Path.Build.Map.keys rules_here.by_file_targets
+    |> Filename.Set.of_list_map ~f:Path.Build.basename
+    |> Filename_set.create ~dir
+    |> Memo.return
   | Build_under_directory_target { directory_target_ancestor } ->
-    let+ _digest, path_map = build_dir (Path.build directory_target_ancestor) in
-    let dir = Path.as_in_build_dir_exn dir in
-    Path.Build.Map.foldi path_map ~init:Path.Set.empty ~f:(fun path _digest acc ->
-      let parent = Path.Build.parent_exn path in
-      match Path.Build.equal parent dir with
-      | true -> Path.Set.add acc (Path.build path)
-      | false -> acc)
+    let+ path_map = build_dir (Path.build directory_target_ancestor) in
+    let filenames =
+      let dir = Path.as_in_build_dir_exn dir in
+      match Targets.Produced.find_dir path_map dir with
+      | Some files -> Filename.Set.of_keys files
+      | None -> Filename.Set.empty
+    in
+    Filename_set.create ~dir filenames
 ;;
 
 let caused_by_cancellation (exn : Exn_with_backtrace.t) =
@@ -1090,12 +1110,7 @@ let report_early_exn exn =
     let+ () = State.add_errors errors
     and+ () =
       match !Clflags.stop_on_first_error with
-      | true ->
-        let* () =
-          (Build_config.get ()).action_runners ()
-          |> Fiber.parallel_iter ~f:Action_runner.cancel_build
-        in
-        Scheduler.stop_on_first_error ()
+      | true -> Scheduler.cancel_current_build ()
       | false -> Fiber.return ()
     in
     (match !Clflags.report_errors_config with
@@ -1115,7 +1130,6 @@ let handle_final_exns exns =
 
 let run f =
   let open Fiber.O in
-  Hooks.End_of_build.once Diff_promotion.finalize;
   let* () = State.reset_progress () in
   let* () = State.reset_errors () in
   let f () =
@@ -1154,10 +1168,27 @@ let build_file p =
   ()
 ;;
 
-let read_file p ~f =
+let build_dir p =
+  let+ (_ : Digest.t Targets.Produced.t) = build_dir p in
+  ()
+;;
+
+let with_file p ~f =
   let+ () = build_file p in
   f p
 ;;
 
+(* CR-someday amokhov: Try running [Io.read_file] in a separate thread. *)
+let read_file =
+  Memo.exec
+    (Memo.create_with_store
+       "Build_system.read_file"
+       ~store:(module Path.Table)
+       ~input:(module Path)
+       ~cutoff:String.equal
+       (fun path -> with_file path ~f:Io.read_file))
+;;
+
 let state = State.t
 let errors = State.errors
+let record_deps (deps : Dep.Set.t) = Action_builder.record () deps ~f:build_dep

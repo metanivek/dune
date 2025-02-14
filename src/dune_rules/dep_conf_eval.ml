@@ -59,11 +59,11 @@ let dep_on_alias_rec alias ~loc =
       }
   | Some _ ->
     let name = Dune_engine.Alias.name alias in
-    let+ alias_status = Alias_rec.dep_on_alias_rec name (Alias.dir alias) in
-    (match alias_status with
+    Alias_rec.dep_on_alias_rec name (Alias.dir alias)
+    >>| (function
      | Defined -> ()
      | Not_defined ->
-       if not (Alias.is_standard name)
+       if not (Alias0.is_standard name)
        then
          User_error.raise
            ~loc
@@ -75,17 +75,16 @@ let dep_on_alias_rec alias ~loc =
            ])
 ;;
 
-let relative d s = Path.build (Path.Build.relative d s)
-
-let expand_include ~expander s =
-  let path = relative (Expander.dir expander) s in
-  let+ ast = Action_builder.read_sexp path in
-  match ast with
-  | Dune_lang.Ast.List (_loc, asts) ->
+let expand_include ~dir ~project s =
+  Path.Build.relative dir s
+  |> Path.build
+  |> Action_builder.read_sexp
+  >>| function
+  | List (_loc, asts) ->
     let dep_parser =
       Dune_lang.Syntax.set
         Stanza.syntax
-        (Active (Dune_project.dune_version (Scope.project (Expander.scope expander))))
+        (Active (Dune_project.dune_version project))
         (String_with_vars.set_decoding_env
            (Pform.Env.initial Stanza.latest_version)
            (Bindings.decode Dep_conf.decode))
@@ -133,7 +132,7 @@ let package loc pkg (context : Build_context.t) ~dune_version =
      Package_db.find_package package_db pkg)
   >>= function
   | Some (Build build) -> build
-  | Some (Local pkg) -> Action_builder.alias (package_install ~context ~pkg)
+  | Some (Local pkg) -> Alias_builder.alias (package_install ~context ~pkg)
   | Some (Installed pkg) ->
     if dune_version < (2, 9)
     then
@@ -147,22 +146,21 @@ let package loc pkg (context : Build_context.t) ~dune_version =
                 ])
         }
     else
-      let* files =
-        (let open Memo.O in
-         Memo.parallel_map pkg.files ~f:(fun (s, l) ->
-           let dir = Section.Map.find_exn pkg.sections s in
-           Memo.parallel_map l ~f:(fun (kind, d) ->
-             let path = Path.relative dir (Install.Entry.Dst.to_string d) in
-             match kind with
-             | `File -> Memo.return [ path ]
-             | `Dir ->
-               let path = Path.as_outside_build_dir_exn path in
-               dir_contents ~loc path >>| List.rev_map ~f:Path.outside_build_dir)
-           >>| List.concat)
+      (let open Memo.O in
+       Memo.parallel_map pkg.files ~f:(fun (s, l) ->
+         let dir = Section.Map.find_exn pkg.sections s in
+         Memo.parallel_map l ~f:(fun (kind, d) ->
+           let path = Path.relative dir (Install.Entry.Dst.to_string d) in
+           match kind with
+           | `File -> Memo.return [ path ]
+           | `Dir ->
+             Path.as_outside_build_dir_exn path
+             |> dir_contents ~loc
+             >>| List.rev_map ~f:Path.outside_build_dir)
          >>| List.concat)
-        |> Action_builder.of_memo
-      in
-      Action_builder.paths files
+       >>| List.concat)
+      |> Action_builder.of_memo
+      >>= Action_builder.paths
   | None ->
     Action_builder.fail
       { fail =
@@ -177,9 +175,11 @@ let rec dep expander : Dep_conf.t -> _ = function
   | Include s ->
     (* TODO this is wrong. we shouldn't allow bindings here if we are in an
        unnamed expansion *)
-    let deps = expand_include ~expander s in
+    let dir = Expander.dir expander in
     Other
-      (let* deps = deps in
+      (let* project = Action_builder.of_memo @@ Dune_load.find_project ~dir in
+       let deps = expand_include ~dir ~project s in
+       let* deps = deps in
        let builder, _bindings = named_paths_builder ~expander deps in
        let+ paths = builder in
        paths)
@@ -207,7 +207,7 @@ let rec dep expander : Dep_conf.t -> _ = function
   | Alias s ->
     Other
       (let* a = make_alias expander s in
-       let+ () = Action_builder.alias a in
+       let+ () = Alias_builder.alias a in
        [])
   | Alias_rec s ->
     Other
@@ -218,7 +218,7 @@ let rec dep expander : Dep_conf.t -> _ = function
     Other
       (Glob_files_expand.action_builder
          glob_files
-         ~f:(Expander.expand_str expander)
+         ~f:(Expander.expand ~mode:Single expander)
          ~base_dir:(Expander.dir expander)
        >>| Glob_files_expand.Expanded.matches
        >>| List.map ~f:(fun path ->
@@ -234,10 +234,14 @@ let rec dep expander : Dep_conf.t -> _ = function
     Other
       (let+ () =
          let* pkg = Expander.expand_str expander p in
-         let context = Context.build_context (Expander.context expander) in
+         let context = Build_context.create ~name:(Expander.context expander) in
          let loc = String_with_vars.loc p in
-         let dune_version =
-           Dune_project.dune_version @@ Scope.project @@ Expander.scope expander
+         let* dune_version =
+           Action_builder.of_memo
+           @@
+           let open Memo.O in
+           Dune_load.find_project ~dir:(Expander.dir expander)
+           >>| Dune_project.dune_version
          in
          package loc pkg context ~dune_version
        in
@@ -264,24 +268,21 @@ and named_paths_builder ~expander l =
         (match
            Option.List.all
              (List.map x ~f:(function
-               | Simple x -> Some x
-               | Other _ -> None))
+                | Simple x -> Some x
+                | Other _ -> None))
          with
          | Some x ->
            let open Memo.O in
-           let x = Memo.lazy_ (fun () -> Memo.all x) in
+           let x = Memo.lazy_ (fun () -> Memo.all_concurrently x >>| List.concat) in
            let bindings =
              Pform.Map.set
                bindings
                (Var (User_var name))
-               (Expander.Deps.Without
-                  (let+ paths = Memo.Lazy.force x in
-                   Value.L.paths (List.concat paths)))
+               (Expander.Deps.Without (Memo.Lazy.force x >>| Value.L.paths))
            in
            let x =
              let open Action_builder.O in
              let* x = Action_builder.of_memo (Memo.Lazy.force x) in
-             let x = List.concat x in
              let+ () = Action_builder.paths x in
              x
            in
@@ -297,26 +298,23 @@ and named_paths_builder ~expander l =
              Pform.Map.set
                bindings
                (Var (User_var name))
-               (Expander.Deps.With
-                  (let+ paths = x in
-                   Value.L.paths paths))
+               (Expander.Deps.With (x >>| Value.L.paths))
            in
            x :: builders, bindings))
   in
-  let builder =
-    let+ l = Action_builder.all (List.rev builders) in
-    List.concat l
-  in
+  let builder = List.rev builders |> Action_builder.all >>| List.concat in
   builder, bindings
 ;;
 
 let named ~expander l =
   let builder, bindings = named_paths_builder ~expander l in
   let builder =
-    let+ paths = builder in
-    Value.L.paths paths
+    let builder =
+      let+ paths = builder in
+      Value.L.paths paths
+    in
+    Action_builder.memoize ~cutoff:(List.equal Value.equal) "deps" builder
   in
-  let builder = Action_builder.memoize ~cutoff:(List.equal Value.equal) "deps" builder in
   let bindings = Pform.Map.set bindings (Var Deps) (Expander.Deps.With builder) in
   let expander = Expander.add_bindings_full expander ~bindings in
   ( Action_builder.ignore builder

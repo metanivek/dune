@@ -3,9 +3,10 @@ Some environment variables are automatically exported by packages:
   $ . ./helpers.sh
 
   $ make_lockdir
-  $ touch dune.lock/test.pkg
+  $ echo "(version 0.0.1)" > dune.lock/test.pkg
   $ cat >dune.lock/usetest.pkg <<'EOF'
-  > (deps test)
+  > (version 0.0.1)
+  > (depends test)
   > (build
   >  (system "\| echo MANPATH=$MANPATH
   >          "\| echo OCAMLPATH=$OCAMLPATH

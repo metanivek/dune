@@ -1,4 +1,5 @@
 open Import
+open Memo.O
 
 let toplevel_dir_prefix = ".toplevel."
 
@@ -24,13 +25,12 @@ module Source = struct
   let obj_dir { dir; name; _ } = Obj_dir.make_exe ~dir ~name
 
   let modules t pp =
-    let open Memo.O in
-    main_module t |> Pp_spec.pp_module pp >>| Modules.singleton_exe
+    main_module t |> Pp_spec.pp_module pp >>| Modules.With_vlib.singleton_exe
   ;;
 
   let make ~dir ~loc ~main ~name = { dir; main; name; loc }
 
-  let of_stanza ~dir ~(toplevel : Dune_file.Toplevel.t) =
+  let of_stanza ~dir ~(toplevel : Toplevel_stanza.t) =
     { dir = Path.Build.relative dir (toplevel_dir_prefix ^ toplevel.name)
     ; name = toplevel.name
     ; loc = toplevel.loc
@@ -73,13 +73,13 @@ let make ~cctx ~source ~preprocess expander = { cctx; source; preprocess; expand
 let pp_flags t =
   let open Action_builder.O in
   let open Pp.O in
-  let sctx = Compilation_context.super_context t.cctx in
   let scope = Compilation_context.scope t.cctx in
   match t.preprocess with
   | Pps { loc; pps; flags; staged = _ } ->
     let+ exe, flags =
-      Preprocessing.get_ppx_driver
-        sctx
+      let ctx = Compilation_context.context t.cctx in
+      Ppx_driver.get_ppx_driver
+        ctx
         ~loc
         ~expander:t.expander
         ~lib_name:None
@@ -118,8 +118,9 @@ let setup_module_rules t =
     Action_builder.write_file_dyn
       path
       (let* libs = Resolve.Memo.read requires_compile in
+       let lib_config = (Compilation_context.ocaml t.cctx).lib_config in
        let include_dirs =
-         Path.Set.to_list (Lib_flags.L.include_paths libs (Ocaml Byte))
+         Path.Set.to_list (Lib_flags.L.include_paths libs (Ocaml Byte) lib_config)
        in
        let* pp_ppx = pp_flags t in
        let pp_dirs = Source.pp_ml t.source ~include_dirs in
@@ -130,7 +131,6 @@ let setup_module_rules t =
 ;;
 
 let setup_rules_and_return_exe_path t ~linkage =
-  let open Memo.O in
   let program = Source.program t.source in
   let* (_ : Exe.dep_graphs) =
     Exe.build_and_link
@@ -174,8 +174,7 @@ let print_toplevel_init_file { include_paths; files_to_load; uses; pp; ppx; code
 ;;
 
 module Stanza = struct
-  let setup ~sctx ~dir ~(toplevel : Dune_file.Toplevel.t) =
-    let open Memo.O in
+  let setup ~sctx ~dir ~(toplevel : Toplevel_stanza.t) =
     let source = Source.of_stanza ~dir ~toplevel in
     let* expander = Super_context.expander sctx ~dir in
     let* scope = Scope.DB.find_by_dir dir in
@@ -188,13 +187,13 @@ module Stanza = struct
     in
     let* preprocessing =
       let preprocess = Module_name.Per_item.for_all toplevel.pps in
-      Preprocessing.make
+      Pp_spec_rules.make
         sctx
         ~dir
         ~expander
         ~scope
         ~lib_name:None
-        ~lint:Dune_file.Lint.no_lint
+        ~lint:Lint.no_lint
         ~preprocess
         ~preprocessor_deps:[]
         ~instrumentation_deps:[]
@@ -203,8 +202,7 @@ module Stanza = struct
       let compiler_libs =
         Lib_name.parse_string_exn (source.loc, "compiler-libs.toplevel")
       in
-      let names = [ source.loc, source.name ] in
-      let merlin_ident = Merlin_ident.for_exes ~names:(List.map ~f:snd names) in
+      let names = Nonempty_list.[ source.loc, source.name ] in
       Lib.DB.resolve_user_written_deps
         (Scope.libs scope)
         (`Exe names)
@@ -214,7 +212,6 @@ module Stanza = struct
         ~pps
         ~dune_version
         ~allow_overlaps:false
-        ~merlin_ident
     in
     let requires_compile = Lib.Compile.direct_requires compile_info in
     let requires_link = Lib.Compile.requires_link compile_info in
@@ -237,7 +234,8 @@ module Stanza = struct
         ~requires_compile
         ~requires_link
         ~flags
-        ~js_of_ocaml:None
+        ~js_of_ocaml:(Js_of_ocaml.Mode.Pair.make None)
+        ~melange_package_name:None
         ~package:None
         ~preprocessing
     in

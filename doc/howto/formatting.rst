@@ -14,7 +14,7 @@ First, let's open the ``dune-project`` file. Make sure that the version
 specified in ``(lang dune X.Y)`` is at least ``2.0``. Most formatting
 configuration happens in that file. If you want to format OCaml sources and
 ``dune`` files, you don't have anything to add. Otherwise, refer to the
-:ref:`(formatting) <formatting>` stanza.
+:doc:`/reference/dune-project/formatting` stanza.
 
 Next we need to install some code formatting tools. For OCaml code, this means
 installing OCamlFormat_ with ``opam install ocamlformat``. Formatting ``dune``
@@ -46,7 +46,7 @@ Running the Formatters
 Run the ``dune build @fmt`` command. It will format the source files in the
 corresponding project and display the differences:
 
-.. code::
+.. code:: console
 
     $ dune build @fmt
     --- hello.ml
@@ -60,7 +60,7 @@ corresponding project and display the differences:
 Then it's possible to accept the correction by calling ``dune promote`` to
 replace the source files with the corrected versions.
 
-.. code::
+.. code:: console
 
     $ dune promote
     Promoting _build/default/hello.ml.formatted to hello.ml.

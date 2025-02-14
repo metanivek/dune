@@ -1,105 +1,5 @@
 open Import
 
-module Source = struct
-  type fetch =
-    { url : Loc.t * string
-    ; checksum : (Loc.t * Checksum.t) option
-    }
-
-  type t =
-    | External_copy of Loc.t * Path.External.t
-    | Fetch of fetch
-
-  let remove_locs = function
-    | External_copy (_loc, path) -> External_copy (Loc.none, path)
-    | Fetch { url = _loc, url; checksum } ->
-      Fetch
-        { url = Loc.none, url
-        ; checksum = Option.map checksum ~f:(fun (_loc, checksum) -> Loc.none, checksum)
-        }
-  ;;
-
-  let equal a b =
-    match a, b with
-    | External_copy (loc, path), External_copy (other_loc, other_path) ->
-      Loc.equal loc other_loc && Path.External.equal path other_path
-    | ( Fetch { url = loc, url; checksum }
-      , Fetch { url = other_loc, other_url; checksum = other_checksum } ) ->
-      Loc.equal loc other_loc
-      && String.equal url other_url
-      && Option.equal
-           (fun (loc, checksum) (other_loc, other_checksum) ->
-             Loc.equal loc other_loc && Checksum.equal checksum other_checksum)
-           checksum
-           other_checksum
-    | _ -> false
-  ;;
-
-  let to_dyn = function
-    | External_copy (_loc, path) ->
-      Dyn.variant "External_copy" [ Path.External.to_dyn path ]
-    | Fetch { url = _loc, url; checksum } ->
-      Dyn.variant
-        "Fetch"
-        [ Dyn.string url
-        ; Dyn.option (fun (_loc, checksum) -> Checksum.to_dyn checksum) checksum
-        ]
-  ;;
-
-  module Fields = struct
-    let copy = "copy"
-    let fetch = "fetch"
-    let url = "url"
-    let checksum = "checksum"
-  end
-
-  let decode_fetch =
-    let open Decoder in
-    let+ url = field Fields.url (located string)
-    and+ checksum = field_o Fields.checksum (located string) in
-    let checksum =
-      match checksum with
-      | None -> None
-      | Some ((loc, _) as checksum) ->
-        let checksum = Checksum.of_string_user_error checksum |> User_error.ok_exn in
-        Some (loc, checksum)
-    in
-    { url; checksum }
-  ;;
-
-  let decode =
-    let open Decoder in
-    sum
-      [ ( Fields.copy
-        , located string
-          >>| fun (loc, source) path ->
-          External_copy
-            ( loc
-            , if Filename.is_relative source
-              then Path.External.relative path source
-              else Path.External.of_string source ) )
-      ; ( Fields.fetch
-        , let+ fetch = fields decode_fetch in
-          fun _ -> Fetch fetch )
-      ]
-  ;;
-
-  let encode_fetch_field { url = _loc, url; checksum } =
-    let open Encoder in
-    [ field Fields.url string url
-    ; field_o Fields.checksum Checksum.encode (Option.map checksum ~f:snd)
-    ]
-  ;;
-
-  let encode t =
-    let open Encoder in
-    match t with
-    | External_copy (_loc, path) ->
-      constr Fields.copy string (Path.External.to_string path)
-    | Fetch fetch -> named_record_fields Fields.fetch (encode_fetch_field fetch)
-  ;;
-end
-
 module Pkg_info = struct
   type t =
     { name : Package_name.t
@@ -140,21 +40,82 @@ module Pkg_info = struct
   ;;
 
   let default_version = Package_version.of_string "dev"
+
+  let variables t =
+    let module Variable = OpamVariable in
+    Package_variable_name.Map.of_list_exn
+      [ Package_variable_name.name, Variable.S (Package_name.to_string t.name)
+      ; Package_variable_name.version, S (Package_version.to_string t.version)
+      ; Package_variable_name.dev, B t.dev
+      ]
+  ;;
+end
+
+module Build_command = struct
+  type t =
+    | Action of Action.t
+    | Dune
+
+  let equal x y =
+    match x, y with
+    | Dune, Dune -> true
+    | Action x, Action y -> Action.equal x y
+    | _, _ -> false
+  ;;
+
+  let remove_locs = function
+    | Dune -> Dune
+    | Action a -> Action (Action.remove_locs a)
+  ;;
+
+  let to_dyn = function
+    | Dune -> Dyn.variant "Dune" []
+    | Action a -> Dyn.variant "Action" [ Action.to_dyn a ]
+  ;;
+
+  module Fields = struct
+    let dune = "dune"
+    let build = "build"
+  end
+
+  let encode t =
+    let open Encoder in
+    match t with
+    | None -> field_o Fields.build Encoder.unit None
+    | Some Dune -> field_b Fields.dune true
+    | Some (Action a) -> field Fields.build Action.encode a
+  ;;
+
+  let decode =
+    let open Decoder in
+    fields_mutually_exclusive
+      ~default:None
+      [ ( Fields.build
+        , let+ pkg = Action.decode_pkg in
+          Some (Action pkg) )
+      ; ( Fields.dune
+        , let+ () = return () in
+          Some Dune )
+      ]
+  ;;
 end
 
 module Pkg = struct
   type t =
-    { build_command : Action.t option
+    { build_command : Build_command.t option
     ; install_command : Action.t option
-    ; deps : (Loc.t * Package_name.t) list
+    ; depends : (Loc.t * Package_name.t) list
+    ; depexts : string list
     ; info : Pkg_info.t
     ; exported_env : String_with_vars.t Action.Env_update.t list
     }
 
-  let equal { build_command; install_command; deps; info; exported_env } t =
-    Option.equal Action.equal_no_locs build_command t.build_command
+  let equal { build_command; install_command; depends; depexts; info; exported_env } t =
+    Option.equal Build_command.equal build_command t.build_command
+    (* CR-rgrinberg: why do we ignore locations? *)
     && Option.equal Action.equal_no_locs install_command t.install_command
-    && List.equal (Tuple.T2.equal Loc.equal Package_name.equal) deps t.deps
+    && List.equal (Tuple.T2.equal Loc.equal Package_name.equal) depends t.depends
+    && List.equal String.equal depexts t.depexts
     && Pkg_info.equal info t.info
     && List.equal
          (Action.Env_update.equal String_with_vars.equal)
@@ -162,31 +123,46 @@ module Pkg = struct
          t.exported_env
   ;;
 
-  let remove_locs t =
-    { t with
-      info = Pkg_info.remove_locs t.info
+  let remove_locs { build_command; install_command; depends; depexts; info; exported_env }
+    =
+    { info = Pkg_info.remove_locs info
     ; exported_env =
-        List.map t.exported_env ~f:(Action.Env_update.map ~f:String_with_vars.remove_locs)
-    ; deps = List.map t.deps ~f:(fun (_, pkg) -> Loc.none, pkg)
+        List.map exported_env ~f:(Action.Env_update.map ~f:String_with_vars.remove_locs)
+    ; depends = List.map depends ~f:(fun (_, pkg) -> Loc.none, pkg)
+    ; depexts
+    ; build_command = Option.map build_command ~f:Build_command.remove_locs
+    ; install_command = Option.map install_command ~f:Action.remove_locs
     }
   ;;
 
-  let to_dyn { build_command; install_command; deps; info; exported_env } =
+  let to_dyn { build_command; install_command; depends; depexts; info; exported_env } =
     Dyn.record
-      [ "build_command", Dyn.option Action.to_dyn build_command
+      [ "build_command", Dyn.option Build_command.to_dyn build_command
       ; "install_command", Dyn.option Action.to_dyn install_command
-      ; "deps", Dyn.list (Dyn.pair Loc.to_dyn_hum Package_name.to_dyn) deps
+      ; "depends", Dyn.list (Dyn.pair Loc.to_dyn_hum Package_name.to_dyn) depends
+      ; "depexts", Dyn.list String.to_dyn depexts
       ; "info", Pkg_info.to_dyn info
       ; ( "exported_env"
         , Dyn.list (Action.Env_update.to_dyn String_with_vars.to_dyn) exported_env )
       ]
   ;;
 
+  let compute_missing_checksum t ~pinned =
+    let open Fiber.O in
+    let+ source =
+      match t.info.source with
+      | None -> Fiber.return None
+      | Some source ->
+        Source.compute_missing_checksum source t.info.name ~pinned >>| Option.some
+    in
+    { t with info = { t.info with source } }
+  ;;
+
   module Fields = struct
     let version = "version"
     let install = "install"
-    let build = "build"
-    let deps = "deps"
+    let depends = "depends"
+    let depexts = "depexts"
     let source = "source"
     let dev = "dev"
     let exported_env = "exported_env"
@@ -197,11 +173,12 @@ module Pkg = struct
     let open Decoder in
     enter
     @@ fields
-    @@ let+ version =
-         field ~default:Pkg_info.default_version Fields.version Package_version.decode
+    @@ let+ version = field Fields.version Package_version.decode
        and+ install_command = field_o Fields.install Action.decode_pkg
-       and+ build_command = field_o Fields.build Action.decode_pkg
-       and+ deps = field ~default:[] Fields.deps (repeat (located Package_name.decode))
+       and+ build_command = Build_command.decode
+       and+ depends =
+         field ~default:[] Fields.depends (repeat (located Package_name.decode))
+       and+ depexts = field ~default:[] Fields.depexts (repeat string)
        and+ source = field_o Fields.source Source.decode
        and+ dev = field_b Fields.dev
        and+ exported_env =
@@ -226,7 +203,7 @@ module Pkg = struct
            in
            { Pkg_info.name; version; dev; source; extra_sources }
          in
-         { build_command; deps; install_command; info; exported_env }
+         { build_command; depends; depexts; install_command; info; exported_env }
   ;;
 
   let encode_extra_source (local, source) : Dune_sexp.t =
@@ -237,24 +214,30 @@ module Pkg = struct
   ;;
 
   let encode
-    { build_command
-    ; install_command
-    ; deps
-    ; info = { Pkg_info.name = _; extra_sources; version; dev; source }
-    ; exported_env
-    }
+        { build_command
+        ; install_command
+        ; depends
+        ; depexts
+        ; info = { Pkg_info.name = _; extra_sources; version; dev; source }
+        ; exported_env
+        }
     =
     let open Encoder in
     record_fields
       [ field Fields.version Package_version.encode version
       ; field_o Fields.install Action.encode install_command
-      ; field_o Fields.build Action.encode build_command
-      ; field_l Fields.deps Package_name.encode (List.map deps ~f:snd)
+      ; Build_command.encode build_command
+      ; field_l Fields.depends Package_name.encode (List.map depends ~f:snd)
+      ; field_l Fields.depexts string depexts
       ; field_o Fields.source Source.encode source
       ; field_b Fields.dev dev
       ; field_l Fields.exported_env Action.Env_update.encode exported_env
       ; field_l Fields.extra_sources encode_extra_source extra_sources
       ]
+  ;;
+
+  let files_dir package_name ~lock_dir =
+    Path.Source.relative lock_dir (Package_name.to_string package_name ^ ".files")
   ;;
 end
 
@@ -305,6 +288,7 @@ end
 
 type t =
   { version : Syntax.Version.t
+  ; dependency_hash : (Loc.t * Local_package.Dependency_hash.t) option
   ; packages : Pkg.t Package_name.Map.t
   ; ocaml : (Loc.t * Package_name.t) option
   ; repos : Repositories.t
@@ -318,8 +302,21 @@ let remove_locs t =
   }
 ;;
 
-let equal { version; packages; ocaml; repos; expanded_solver_variable_bindings } t =
+let equal
+      { version
+      ; dependency_hash
+      ; packages
+      ; ocaml
+      ; repos
+      ; expanded_solver_variable_bindings
+      }
+      t
+  =
   Syntax.Version.equal version t.version
+  && Option.equal
+       (Tuple.T2.equal Loc.equal Local_package.Dependency_hash.equal)
+       dependency_hash
+       t.dependency_hash
   && Option.equal (Tuple.T2.equal Loc.equal Package_name.equal) ocaml t.ocaml
   && Repositories.equal repos t.repos
   && Package_name.Map.equal packages t.packages ~equal:Pkg.equal
@@ -328,9 +325,21 @@ let equal { version; packages; ocaml; repos; expanded_solver_variable_bindings }
        t.expanded_solver_variable_bindings
 ;;
 
-let to_dyn { version; packages; ocaml; repos; expanded_solver_variable_bindings } =
+let to_dyn
+      { version
+      ; dependency_hash
+      ; packages
+      ; ocaml
+      ; repos
+      ; expanded_solver_variable_bindings
+      }
+  =
   Dyn.record
     [ "version", Syntax.Version.to_dyn version
+    ; ( "dependency_hash"
+      , Dyn.option
+          (Tuple.T2.to_dyn Loc.to_dyn_hum Local_package.Dependency_hash.to_dyn)
+          dependency_hash )
     ; "packages", Package_name.Map.to_dyn Pkg.to_dyn packages
     ; "ocaml", Dyn.option (Tuple.T2.to_dyn Loc.to_dyn_hum Package_name.to_dyn) ocaml
     ; "repos", Repositories.to_dyn repos
@@ -339,8 +348,58 @@ let to_dyn { version; packages; ocaml; repos; expanded_solver_variable_bindings 
     ]
 ;;
 
-let create_latest_version packages ~ocaml ~repos ~expanded_solver_variable_bindings =
-  let version = Syntax.greatest_supported_version Dune_lang.Pkg.syntax in
+type missing_dependency =
+  { dependant_package : Pkg.t
+  ; dependency : Package_name.t
+  ; loc : Loc.t
+  }
+
+(* [validate_packages packages] returns
+   [Error (`Missing_dependencies missing_dependencies)] where
+   [missing_dependencies] is a non-empty list with an element for each package
+   dependency which doesn't have a corresponding entry in [packages]. *)
+let validate_packages packages =
+  let missing_dependencies =
+    Package_name.Map.values packages
+    |> List.concat_map ~f:(fun (dependant_package : Pkg.t) ->
+      List.filter_map dependant_package.depends ~f:(fun (loc, dependency) ->
+        (* CR-someday rgrinberg: do we need the dune check? aren't
+           we supposed to filter these upfront? *)
+        if
+          Package_name.Map.mem packages dependency
+          || Package_name.equal dependency Dune_dep.name
+        then None
+        else Some { dependant_package; dependency; loc }))
+  in
+  if List.is_empty missing_dependencies
+  then Ok ()
+  else Error (`Missing_dependencies missing_dependencies)
+;;
+
+let create_latest_version
+      packages
+      ~local_packages
+      ~ocaml
+      ~repos
+      ~expanded_solver_variable_bindings
+  =
+  (match validate_packages packages with
+   | Ok () -> ()
+   | Error (`Missing_dependencies missing_dependencies) ->
+     List.map missing_dependencies ~f:(fun { dependant_package; dependency; loc = _ } ->
+       ( "missing dependency"
+       , Dyn.record
+           [ "missing package", Package_name.to_dyn dependency
+           ; "dependency of", Package_name.to_dyn dependant_package.info.name
+           ] ))
+     |> Code_error.raise "Invalid package table");
+  let version = Syntax.greatest_supported_version_exn Dune_lang.Pkg.syntax in
+  let dependency_hash =
+    local_packages
+    |> Local_package.For_solver.non_local_dependencies
+    |> Local_package.Dependency_hash.of_dependency_formula
+    |> Option.map ~f:(fun dependency_hash -> Loc.none, dependency_hash)
+  in
   let complete, used =
     match repos with
     | None -> true, None
@@ -349,8 +408,21 @@ let create_latest_version packages ~ocaml ~repos ~expanded_solver_variable_bindi
       let complete = Int.equal (List.length repos) (List.length used) in
       complete, Some used
   in
-  let repos : Repositories.t = { complete; used } in
-  { version; packages; ocaml; repos; expanded_solver_variable_bindings }
+  { version
+  ; dependency_hash
+  ; packages
+  ; ocaml
+  ; repos = { complete; used }
+  ; expanded_solver_variable_bindings
+  }
+;;
+
+let dev_tools_path = Path.Source.(relative root "dev-tools.locks")
+
+let dev_tool_lock_dir_path dev_tool =
+  Path.Source.relative
+    dev_tools_path
+    (Package_name.to_string (Dev_tool.package_name dev_tool))
 ;;
 
 let default_path = Path.Source.(relative root "dune.lock")
@@ -361,7 +433,13 @@ module Metadata = Dune_sexp.Versioned_file.Make (Unit)
 let () = Metadata.Lang.register Dune_lang.Pkg.syntax ()
 
 let encode_metadata
-  { version; ocaml; repos; packages = _; expanded_solver_variable_bindings }
+      { version
+      ; dependency_hash
+      ; ocaml
+      ; repos
+      ; packages = _
+      ; expanded_solver_variable_bindings
+      }
   =
   let open Encoder in
   let base =
@@ -373,6 +451,15 @@ let encode_metadata
       ]
   in
   [ base ]
+  @ (match dependency_hash with
+     | None -> []
+     | Some (_loc, dependency_hash) ->
+       [ list
+           sexp
+           [ string "dependency_hash"
+           ; Local_package.Dependency_hash.encode dependency_hash
+           ]
+       ])
   @ (match ocaml with
      | None -> []
      | Some ocaml -> [ list sexp [ string "ocaml"; Package_name.encode (snd ocaml) ] ])
@@ -393,6 +480,8 @@ let decode_metadata =
   let open Decoder in
   fields
     (let+ ocaml = field_o "ocaml" (located Package_name.decode)
+     and+ dependency_hash =
+       field_o "dependency_hash" (located Local_package.Dependency_hash.decode)
      and+ repos = field "repositories" ~default:Repositories.default Repositories.decode
      and+ expanded_solver_variable_bindings =
        field
@@ -400,7 +489,7 @@ let decode_metadata =
          ~default:Solver_stats.Expanded_variable_bindings.empty
          Solver_stats.Expanded_variable_bindings.decode
      in
-     ocaml, repos, expanded_solver_variable_bindings)
+     ocaml, dependency_hash, repos, expanded_solver_variable_bindings)
 ;;
 
 module Package_filename = struct
@@ -409,7 +498,7 @@ module Package_filename = struct
 
   let to_package_name package_filename =
     if String.equal (Filename.extension package_filename) file_extension
-    then Ok (Filename.chop_extension package_filename |> Package_name.of_string)
+    then Ok (Filename.remove_extension package_filename |> Package_name.of_string)
     else Error `Bad_extension
   ;;
 end
@@ -428,22 +517,51 @@ module Write_disk = struct
      values indicate that it's unsafe to remove the existing directory and lock
      directory regeneration should not proceed. *)
   let check_existing_lock_dir path =
-    match Path.exists path with
-    | false -> Ok `Non_existant
-    | true ->
-      (match Path.is_directory path with
-       | false -> Error `Not_directory
-       | true ->
-         let metadata_path = Path.relative path metadata_filename in
-         (match Path.exists metadata_path && not (Path.is_directory metadata_path) with
-          | false -> Error `No_metadata_file
-          | true ->
-            (match Metadata.load metadata_path ~f:(Fun.const decode_metadata) with
-             | Ok _unused -> Ok `Is_existing_lock_dir
-             | Error exn -> Error (`Failed_to_parse_metadata (metadata_path, exn)))))
+    match Path.stat path with
+    | Ok { st_kind = S_DIR; _ } ->
+      let metadata_path = Path.relative path metadata_filename in
+      (match Path.stat metadata_path with
+       | Ok { st_kind = S_REG; _ } ->
+         (match Metadata.load metadata_path ~f:(Fun.const decode_metadata) with
+          | Ok _unused -> Ok `Is_existing_lock_dir
+          | Error exn -> Error (`Failed_to_parse_metadata (metadata_path, exn)))
+       | _ -> Error `No_metadata_file)
+    | Error (Unix.ENOENT, _, _) -> Ok `Non_existant
+    | Error _ -> Error `Unreadable
+    | Ok _ -> Error `Not_directory
   ;;
 
-  (* Removes the exitsing lock directory at the specified path if it exists and
+  let raise_user_error_on_check_existance path e =
+    let error_reason =
+      match e with
+      | `Unreadable ->
+        Pp.textf "Unable to read lock directory (%s)" (Path.to_string_maybe_quoted path)
+      | `Not_directory ->
+        Pp.textf
+          "Specified lock dir path (%s) is not a directory"
+          (Path.to_string_maybe_quoted path)
+      | `No_metadata_file ->
+        Pp.textf "Specified lock dir lacks metadata file (%s)" metadata_filename
+      | `Failed_to_parse_metadata (path, exn) ->
+        Pp.concat
+          ~sep:Pp.cut
+          [ Pp.textf
+              "Unable to parse lock directory metadata file (%s):"
+              (Path.to_string_maybe_quoted path)
+            |> Pp.hovbox
+          ; Exn.pp exn |> Pp.hovbox
+          ]
+        |> Pp.vbox
+    in
+    User_error.raise
+      [ Pp.textf
+          "Refusing to regenerate lock directory %s"
+          (Path.to_string_maybe_quoted path)
+      ; error_reason
+      ]
+  ;;
+
+  (* Removes the existing lock directory at the specified path if it exists and
      is a valid lock directory. Checks the validity of the existing lockdir (if
      any) and raises if it's invalid before constructing the returned thunk, so
      validation can happen separately from executing the side effect that removes
@@ -452,37 +570,53 @@ module Write_disk = struct
     match check_existing_lock_dir path with
     | Ok `Non_existant -> Fun.const ()
     | Ok `Is_existing_lock_dir -> fun () -> Path.rm_rf path
-    | Error e ->
+    | Error e -> raise_user_error_on_check_existance path e
+  ;;
+
+  (* Does the same checks as [safely_remove_lock_dir_if_exists_thunk] but it raises an
+     error if the lock dir already exists. [dst] is the new file name *)
+  let safely_rename_lock_dir_thunk ~dst src =
+    match check_existing_lock_dir src, check_existing_lock_dir dst with
+    | Ok `Is_existing_lock_dir, Ok `Non_existant -> fun () -> Path.rename src dst
+    | Ok `Non_existant, Ok `Non_existant -> Fun.const ()
+    | _, Ok `Is_existing_lock_dir ->
       let error_reason_pp =
-        match e with
-        | `Not_directory -> Pp.text "Specified lock dir path is not a directory"
-        | `No_metadata_file ->
-          Pp.textf "Specified lock dir lacks metadata file (%s)" metadata_filename
-        | `Failed_to_parse_metadata (path, exn) ->
-          Pp.concat
-            ~sep:Pp.newline
-            [ Pp.textf
-                "Unable to parse lock directory metadata file (%s):"
-                (Path.to_string_maybe_quoted path)
-            ; Exn.pp exn
-            ]
+        Pp.textf
+          "Directory %s already exists: can't rename safely"
+          (Path.to_string_maybe_quoted src)
       in
       User_error.raise
         [ Pp.textf
             "Refusing to regenerate lock directory %s"
-            (Path.to_string_maybe_quoted path)
+            (Path.to_string_maybe_quoted src)
         ; error_reason_pp
         ]
+    | Error e, _ -> raise_user_error_on_check_existance src e
+    | _, Error e -> raise_user_error_on_check_existance dst e
   ;;
 
   type t = unit -> unit
 
-  let prepare ~lock_dir_path ~files lock_dir =
-    let lock_dir_path = Path.source lock_dir_path in
-    let remove_dir_if_exists = safely_remove_lock_dir_if_exists_thunk lock_dir_path in
-    fun () ->
-      remove_dir_if_exists ();
-      Path.mkdir_p lock_dir_path;
+  let prepare
+        ~lock_dir_path:lock_dir_path_src
+        ~(files : File_entry.t Package_name.Map.Multi.t)
+        lock_dir
+    =
+    let lock_dir_hidden_src =
+      (* The original lockdir path with the lockdir renamed to begin with a ".". *)
+      let hidden_basename = sprintf ".%s" (Path.Source.basename lock_dir_path_src) in
+      Path.Source.relative (Path.Source.parent_exn lock_dir_path_src) hidden_basename
+    in
+    let lock_dir_hidden_src = Path.source lock_dir_hidden_src in
+    let lock_dir_path_external = Path.source lock_dir_path_src in
+    let remove_hidden_dir_if_exists () =
+      safely_remove_lock_dir_if_exists_thunk lock_dir_hidden_src ()
+    in
+    let rename_old_lock_dir_to_hidden =
+      safely_rename_lock_dir_thunk ~dst:lock_dir_hidden_src lock_dir_path_external
+    in
+    let build lock_dir_path =
+      let lock_dir_path = Result.ok_exn lock_dir_path in
       file_contents_by_path lock_dir
       |> List.iter ~f:(fun (path_within_lock_dir, contents) ->
         let path = Path.relative lock_dir_path path_within_lock_dir in
@@ -491,6 +625,8 @@ module Write_disk = struct
           List.map contents ~f:(fun sexp ->
             Dune_sexp.Ast.add_loc ~loc:Loc.none sexp |> Dune_sexp.Cst.concrete)
         in
+        (* TODO the version should be chosen based on the version of the lock
+           directory we're outputting *)
         let pp = Dune_lang.Format.pp_top_sexps ~version:(3, 11) cst in
         Format.asprintf "%a" Pp.to_fmt pp |> Io.write_file path;
         Package_name.Map.iteri files ~f:(fun package_name files ->
@@ -503,7 +639,19 @@ module Write_disk = struct
             Path.mkdir_p (Path.parent_exn dst);
             match original with
             | Path src -> Io.copy_file ~src ~dst ()
-            | Content content -> Io.write_file dst content)))
+            | Content content -> Io.write_file dst content)));
+      rename_old_lock_dir_to_hidden ();
+      safely_rename_lock_dir_thunk ~dst:lock_dir_path_external lock_dir_path ();
+      remove_hidden_dir_if_exists ()
+    in
+    match Path.(parent (source lock_dir_path_src)) with
+    | Some parent_dir ->
+      fun () ->
+        Path.mkdir_p parent_dir;
+        Temp.with_temp_dir ~parent_dir ~prefix:"dune" ~suffix:"lock" ~f:build
+    | None ->
+      User_error.raise
+        [ Pp.textf "Temporary directory can't be created by deriving the lock dir path" ]
   ;;
 
   let commit t = t ()
@@ -520,17 +668,25 @@ module Make_load (Io : sig
 struct
   let load_metadata metadata_file_path =
     let open Io.O in
-    let+ syntax, version, ocaml, repos, expanded_solver_variable_bindings =
+    let+ syntax, version, dependency_hash, ocaml, repos, expanded_solver_variable_bindings
+      =
       Io.with_lexbuf_from_file metadata_file_path ~f:(fun lexbuf ->
         Metadata.parse_contents
           lexbuf
           ~f:(fun { Metadata.Lang.Instance.syntax; data = (); version } ->
             let open Decoder in
-            let+ ocaml, repos, expanded_solver_variable_bindings = decode_metadata in
-            syntax, version, ocaml, repos, expanded_solver_variable_bindings))
+            let+ ocaml, dependency_hash, repos, expanded_solver_variable_bindings =
+              decode_metadata
+            in
+            ( syntax
+            , version
+            , dependency_hash
+            , ocaml
+            , repos
+            , expanded_solver_variable_bindings )))
     in
     if String.equal (Syntax.name syntax) (Syntax.name Dune_lang.Pkg.syntax)
-    then version, ocaml, repos, expanded_solver_variable_bindings
+    then version, dependency_hash, ocaml, repos, expanded_solver_variable_bindings
     else
       User_error.raise
         [ Pp.textf
@@ -566,49 +722,102 @@ struct
     let open Io.O in
     Io.stats_kind lock_dir_path
     >>| function
-    | Ok S_DIR -> ()
+    | Ok S_DIR -> Ok ()
     | Error (Unix.ENOENT, _, _) ->
-      User_error.raise
-        ~hints:
-          [ Pp.concat
-              ~sep:Pp.space
-              [ Pp.text "Run"
-              ; User_message.command "dune pkg lock"
-              ; Pp.text "to generate it."
-              ]
-            |> Pp.hovbox
-          ]
-        [ Pp.textf "%s does not exist." (Path.Source.to_string lock_dir_path) ]
+      Error
+        (User_error.make
+           ~hints:
+             [ Pp.concat
+                 ~sep:Pp.space
+                 [ Pp.text "Run"
+                 ; User_message.command "dune pkg lock"
+                 ; Pp.text "to generate it."
+                 ]
+               |> Pp.hovbox
+             ]
+           [ Pp.textf "%s does not exist." (Path.Source.to_string lock_dir_path) ])
     | Error e ->
-      User_error.raise
-        [ Pp.textf "%s is not accessible" (Path.Source.to_string lock_dir_path)
-        ; Pp.textf "reason: %s" (Unix_error.Detailed.to_string_hum e)
-        ]
+      Error
+        (User_error.make
+           [ Pp.textf "%s is not accessible" (Path.Source.to_string lock_dir_path)
+           ; Pp.textf "reason: %s" (Unix_error.Detailed.to_string_hum e)
+           ])
     | _ ->
-      User_error.raise
-        [ Pp.textf "%s is not a directory." (Path.Source.to_string lock_dir_path) ]
+      Error
+        (User_error.make
+           [ Pp.textf "%s is not a directory." (Path.Source.to_string lock_dir_path) ])
+  ;;
+
+  let check_packages packages ~lock_dir_path =
+    match validate_packages packages with
+    | Ok () -> Ok ()
+    | Error (`Missing_dependencies missing_dependencies) ->
+      List.iter missing_dependencies ~f:(fun { dependant_package; dependency; loc } ->
+        User_message.prerr
+          (User_message.make
+             ~loc
+             [ Pp.textf
+                 "The package %S depends on the package %S, but %S does not appear in \
+                  the lockdir %s."
+                 (Package_name.to_string dependant_package.info.name)
+                 (Package_name.to_string dependency)
+                 (Package_name.to_string dependency)
+                 (Path.Source.to_string_maybe_quoted lock_dir_path)
+             ]));
+      Error
+        (User_error.make
+           ~hints:
+             [ Pp.concat
+                 ~sep:Pp.space
+                 [ Pp.text
+                     "This could indicate that the lockdir is corrupted. Delete it and \
+                      then regenerate it by running:"
+                 ; User_message.command "dune pkg lock"
+                 ]
+             ]
+           [ Pp.textf
+               "At least one package dependency is itself not present as a package in \
+                the lockdir %s."
+               (Path.Source.to_string_maybe_quoted lock_dir_path)
+           ])
   ;;
 
   let load lock_dir_path =
     let open Io.O in
-    let* () = check_path lock_dir_path in
-    let* version, ocaml, repos, expanded_solver_variable_bindings =
-      load_metadata (Path.Source.relative lock_dir_path metadata_filename)
-    in
-    let+ packages =
-      Io.readdir_with_kinds lock_dir_path
-      >>| List.filter_map ~f:(fun (name, (kind : Unix.file_kind)) ->
-        match kind with
-        | S_REG -> Package_filename.to_package_name name |> Result.to_option
-        | _ ->
-          (* TODO *)
-          None)
-      >>= Io.parallel_map ~f:(fun package_name ->
-        let+ pkg = load_pkg ~version ~lock_dir_path package_name in
-        package_name, pkg)
-      >>| Package_name.Map.of_list_exn
-    in
-    { version; packages; ocaml; repos; expanded_solver_variable_bindings }
+    let* result = check_path lock_dir_path in
+    match result with
+    | Error e -> Io.return (Error e)
+    | Ok () ->
+      let* version, dependency_hash, ocaml, repos, expanded_solver_variable_bindings =
+        load_metadata (Path.Source.relative lock_dir_path metadata_filename)
+      in
+      let+ packages =
+        Io.readdir_with_kinds lock_dir_path
+        >>| List.filter_map ~f:(fun (name, (kind : Unix.file_kind)) ->
+          match kind with
+          | S_REG -> Package_filename.to_package_name name |> Result.to_option
+          | _ ->
+            (* TODO *)
+            None)
+        >>= Io.parallel_map ~f:(fun package_name ->
+          let+ pkg = load_pkg ~version ~lock_dir_path package_name in
+          package_name, pkg)
+        >>| Package_name.Map.of_list_exn
+      in
+      check_packages packages ~lock_dir_path
+      |> Result.map ~f:(fun () ->
+        { version
+        ; dependency_hash
+        ; packages
+        ; ocaml
+        ; repos
+        ; expanded_solver_variable_bindings
+        })
+  ;;
+
+  let load_exn lock_dir_path =
+    let open Io.O in
+    load lock_dir_path >>| User_error.ok_exn
   ;;
 end
 
@@ -633,3 +842,46 @@ module Load_immediate = Make_load (struct
   end)
 
 let read_disk = Load_immediate.load
+let read_disk_exn = Load_immediate.load_exn
+
+let transitive_dependency_closure t start =
+  let missing_packages =
+    let all_packages_in_lock_dir = Package_name.Set.of_keys t.packages in
+    Package_name.Set.diff start all_packages_in_lock_dir
+  in
+  match Package_name.Set.is_empty missing_packages with
+  | false -> Error (`Missing_packages missing_packages)
+  | true ->
+    let to_visit = Queue.create () in
+    let push_set = Package_name.Set.iter ~f:(Queue.push to_visit) in
+    push_set start;
+    let rec loop seen =
+      match Queue.pop to_visit with
+      | None -> seen
+      | Some node ->
+        let unseen_deps =
+          (* Note that the call to find_exn won't raise because [t] guarantees
+             that its map of dependencies is closed under "depends on". *)
+          Package_name.Set.(
+            diff
+              (of_list_map (Package_name.Map.find_exn t.packages node).depends ~f:snd)
+              seen)
+        in
+        push_set unseen_deps;
+        loop (Package_name.Set.union seen unseen_deps)
+    in
+    Ok (loop start)
+;;
+
+let compute_missing_checksums t ~pinned_packages =
+  let open Fiber.O in
+  let+ packages =
+    Package_name.Map.to_list t.packages
+    |> Fiber.parallel_map ~f:(fun (name, pkg) ->
+      let pinned = Package_name.Set.mem pinned_packages name in
+      let+ pkg = Pkg.compute_missing_checksum pkg ~pinned in
+      name, pkg)
+    >>| Package_name.Map.of_list_exn
+  in
+  { t with packages }
+;;

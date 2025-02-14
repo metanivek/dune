@@ -8,7 +8,7 @@ open Coq_stanza
 type t =
   { libraries : Coq_module.t list Coq_lib_name.Map.t
   ; directories : Path.Build.t list Coq_lib_name.Map.t
-      (* [directories] is used to compute the include paths for Coq's native
+    (* [directories] is used to compute the include paths for Coq's native
          mode *)
   ; extract : Coq_module.t Loc.Map.t
   ; rev_map : [ `Theory of Theory.t | `Extraction of Extraction.t ] Coq_module.Map.t
@@ -28,11 +28,11 @@ let empty =
 ;;
 
 let coq_modules_of_files ~dirs =
-  let filter_v_files (dir, local, files) =
-    dir, local, String.Set.filter files ~f:(fun f -> Filename.check_suffix f ".v")
+  let filter_v_files ({ Source_file_dir.dir = _; path_to_root = _; files } as sd) =
+    { sd with files = String.Set.filter files ~f:(fun f -> Filename.check_suffix f ".v") }
   in
   let dirs = List.map dirs ~f:filter_v_files in
-  let build_mod_dir (dir, prefix, files) =
+  let build_mod_dir { Source_file_dir.dir; path_to_root = prefix; files } =
     String.Set.to_list_map files ~f:(fun file ->
       let name, _ = Filename.split_extension file in
       let name = Coq_module.Name.make name in
@@ -44,7 +44,7 @@ let coq_modules_of_files ~dirs =
 let library t ~name = Coq_lib_name.Map.find_exn t.libraries name
 let directories t ~name = Coq_lib_name.Map.find_exn t.directories name
 
-let check_no_unqualified (loc, (qualif_mode : Dune_file.Include_subdirs.t)) =
+let check_no_unqualified (loc, (qualif_mode : Include_subdirs.t)) =
   if qualif_mode = Include Unqualified
   then
     User_error.raise
@@ -60,14 +60,15 @@ let extract t (stanza : Extraction.t) = Loc.Map.find_exn t.extract stanza.builda
 let of_dir stanzas ~dir ~include_subdirs ~dirs =
   check_no_unqualified include_subdirs;
   let modules = coq_modules_of_files ~dirs in
-  List.fold_left stanzas ~init:empty ~f:(fun acc -> function
+  List.fold_left stanzas ~init:empty ~f:(fun acc stanza ->
+    match Stanza.repr stanza with
     | Theory.T coq ->
       let modules = Coq_module.eval ~dir coq.modules ~standard:modules in
       let directories =
         Coq_lib_name.Map.add_exn
           acc.directories
           (snd coq.name)
-          (List.map dirs ~f:(fun (d, _, _) -> d))
+          (List.map dirs ~f:(fun (d : Source_file_dir.t) -> d.dir))
       in
       let libraries = Coq_lib_name.Map.add_exn acc.libraries (snd coq.name) modules in
       let rev_map =

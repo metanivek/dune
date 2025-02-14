@@ -14,14 +14,18 @@ module Emit = struct
     ; preprocess : Preprocess.With_instrumentation.t Preprocess.Per_module.t
     ; runtime_deps : Loc.t * Dep_conf.t list
     ; preprocessor_deps : Dep_conf.t list
+    ; lint : Preprocess.Without_instrumentation.t Preprocess.Per_module.t
     ; promote : Rule.Promote.t option
     ; compile_flags : Ordered_set_lang.Unexpanded.t
     ; allow_overlapping_dependencies : bool
     ; enabled_if : Blang.t
-    ; dune_version : Dune_lang.Syntax.Version.t
     }
 
-  type Stanza.t += T of t
+  include Stanza.Make (struct
+      type nonrec t = t
+
+      include Poly
+    end)
 
   let implicit_alias = Alias.Name.of_string "melange"
 
@@ -29,7 +33,7 @@ module Emit = struct
     let extension_field = extension in
     let module_systems =
       let module_system =
-        enum [ "es6", Melange.Module_system.Es6; "commonjs", CommonJs ]
+        enum [ "esm", Melange.Module_system.ESM; "es6", ESM; "commonjs", CommonJS ]
       in
       let+ module_systems =
         repeat
@@ -103,9 +107,10 @@ module Emit = struct
            "runtime_deps"
            (located (repeat Dep_conf.decode_no_files))
            ~default:(loc, [])
-       and+ preprocess, preprocessor_deps = Stanza_common.preprocess_fields
+       and+ preprocess, preprocessor_deps = Preprocess.preprocess_fields
+       and+ lint = field "lint" Lint.decode ~default:Lint.default
        and+ promote = field_o "promote" Rule_mode_decoder.Promote.decode
-       and+ loc_instrumentation, instrumentation = Stanza_common.instrumentation
+       and+ instrumentation = Preprocess.Instrumentation.instrumentation
        and+ compile_flags = Ordered_set_lang.Unexpanded.field "compile_flags"
        and+ allow_overlapping_dependencies = field_b "allow_overlapping_dependencies"
        and+ emit_stdlib = field "emit_stdlib" bool ~default:true
@@ -114,19 +119,13 @@ module Emit = struct
          let open Enabled_if in
          let allowed_vars = Any in
          decode ~allowed_vars ~since:None ()
-       and+ dune_version = Dune_lang.Syntax.get_exn Stanza.syntax in
+       in
        let preprocess =
          let init =
            let f libname = Preprocess.With_instrumentation.Ordinary libname in
            Module_name.Per_item.map preprocess ~f:(Preprocess.map ~f)
          in
-         List.fold_left instrumentation ~init ~f:(fun accu ((backend, flags), deps) ->
-           Preprocess.Per_module.add_instrumentation
-             accu
-             ~loc:loc_instrumentation
-             ~flags
-             ~deps
-             backend)
+         List.fold_left instrumentation ~init ~f:Preprocess.Per_module.add_instrumentation
        in
        { loc
        ; target
@@ -139,11 +138,11 @@ module Emit = struct
        ; preprocess
        ; runtime_deps
        ; preprocessor_deps
+       ; lint
        ; promote
        ; compile_flags
        ; allow_overlapping_dependencies
        ; enabled_if
-       ; dune_version
        })
   ;;
 
@@ -160,5 +159,9 @@ let syntax =
 let () =
   Dune_project.Extension.register_simple
     syntax
-    (return [ ("melange.emit", Emit.decode >>| fun x -> [ Emit.T x ]) ])
+    (return
+       [ ( "melange.emit"
+         , let+ stanza = Emit.decode in
+           [ Emit.make_stanza stanza ] )
+       ])
 ;;

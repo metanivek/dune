@@ -53,8 +53,8 @@ module Dict : sig
 end
 
 module Set : sig
-  type key = t
-  type t = bool Dict.t
+  type key := t
+  type t
 
   val singleton : key -> t
 
@@ -80,6 +80,5 @@ val none : t
 val symlink : t
 val copy : t
 val hardlink : t
-val decode : t Dune_sexp.Decoder.t
 val to_string : t -> string
 val to_dyn : t -> Dyn.t

@@ -1,12 +1,5 @@
 open Import
-
-(* A type isomorphic to [Result], but without the negative connotations
-   associated with the word "error". *)
-module Result = struct
-  type ('hit, 'miss) t =
-    | Hit of 'hit
-    | Miss of 'miss
-end
+open Dune_cache.Hit_or_miss
 
 module Workspace_local = struct
   (* Stores information for deciding if a rule needs to be re-executed. *)
@@ -108,7 +101,7 @@ module Workspace_local = struct
       | Targets_missing
       | Dynamic_deps_changed
       | Always_rerun
-      | Error_while_collecting_directory_targets of Unix_error.Detailed.t
+      | Error_while_collecting_directory_targets of Targets.Produced.Error.t
 
     let report ~head_target reason =
       let reason =
@@ -123,10 +116,10 @@ module Workspace_local = struct
         | Targets_changed -> "target changed in build dir"
         | Always_rerun -> "not trying to use the cache"
         | Dynamic_deps_changed -> "dynamic dependencies changed"
-        | Error_while_collecting_directory_targets unix_error ->
+        | Error_while_collecting_directory_targets error ->
           sprintf
             "error while collecting directory targets: %s"
-            (Unix_error.Detailed.to_string_hum unix_error)
+            (Targets.Produced.Error.to_string_hum error)
       in
       Console.print_user_message
         (User_message.make
@@ -140,18 +133,19 @@ module Workspace_local = struct
   end
 
   let compute_target_digests (targets : Targets.Validated.t)
-    : (Digest.t Targets.Produced.t, Miss_reason.t) Result.t
+    : (Digest.t Targets.Produced.t, Miss_reason.t) Dune_cache.Hit_or_miss.t
     =
     match Targets.Produced.of_validated targets with
-    | Error (_, unix_error) -> Miss (Error_while_collecting_directory_targets unix_error)
+    | Error error -> Miss (Error_while_collecting_directory_targets error)
     | Ok targets ->
       (match
-         Targets.Produced.Option.mapi targets ~f:(fun target () ->
-           Cached_digest.build_file ~allow_dirs:true target
-           |> Cached_digest.Digest_result.to_option)
+         Targets.Produced.map_with_errors
+           ~all_errors:false
+           ~f:(Cached_digest.build_file ~allow_dirs:true)
+           targets
        with
-       | Some produced_targets -> Hit produced_targets
-       | None -> Miss Targets_missing)
+       | Ok produced_targets -> Dune_cache.Hit_or_miss.Hit produced_targets
+       | Error _ -> Miss Targets_missing)
   ;;
 
   let lookup_impl ~rule_digest ~targets ~env ~build_deps =
@@ -160,7 +154,7 @@ module Workspace_local = struct
     let prev_trace = Database.get (Path.build head_target) in
     let prev_trace_with_produced_targets =
       match prev_trace with
-      | None -> Result.Miss Miss_reason.No_previous_record
+      | None -> Miss Miss_reason.No_previous_record
       | Some prev_trace ->
         (match Digest.equal prev_trace.rule_digest rule_digest with
          | false -> Miss (Rule_changed (prev_trace.rule_digest, rule_digest))
@@ -179,7 +173,7 @@ module Workspace_local = struct
                | false -> Miss Targets_changed)))
     in
     match prev_trace_with_produced_targets with
-    | Result.Miss reason -> Fiber.return (Result.Miss reason)
+    | Miss reason -> Fiber.return (Miss reason)
     | Hit (prev_trace, produced_targets) ->
       (* CR-someday aalekseyev: If there's a change at one of the last stages,
          we still re-run all the previous stages, which is a bit of a waste. We
@@ -187,14 +181,14 @@ module Workspace_local = struct
          later stages). *)
       let rec loop stages =
         match stages with
-        | [] -> Fiber.return (Result.Hit produced_targets)
+        | [] -> Fiber.return (Hit produced_targets)
         | (deps, old_digest) :: rest ->
           let open Fiber.O in
           let* deps = Memo.run (build_deps deps) in
           let new_digest = Dep.Facts.digest deps ~env in
           (match Digest.equal old_digest new_digest with
            | true -> loop rest
-           | false -> Fiber.return (Result.Miss Miss_reason.Dynamic_deps_changed))
+           | false -> Fiber.return (Miss Miss_reason.Dynamic_deps_changed))
       in
       loop prev_trace.dynamic_deps_stages
   ;;
@@ -205,7 +199,7 @@ module Workspace_local = struct
     let open Fiber.O in
     let+ result =
       match always_rerun with
-      | true -> Fiber.return (Result.Miss Miss_reason.Always_rerun)
+      | true -> Fiber.return (Miss Miss_reason.Always_rerun)
       | false -> lookup_impl ~rule_digest ~targets ~env ~build_deps
     in
     match result with
@@ -219,19 +213,19 @@ module Workspace_local = struct
 end
 
 module Shared = struct
-  let lookup ~can_go_in_shared_cache ~rule_digest ~targets ~target_dir =
+  let lookup ~can_go_in_shared_cache ~rule_digest ~targets =
     let config = Build_config.get () in
     let module Shared_cache = (val config.shared_cache) in
-    Shared_cache.lookup ~can_go_in_shared_cache ~rule_digest ~targets ~target_dir
+    Shared_cache.lookup ~can_go_in_shared_cache ~rule_digest ~targets
   ;;
 
   let examine_targets_and_store
-    ~can_go_in_shared_cache
-    ~loc
-    ~rule_digest
-    ~execution_parameters
-    ~action
-    ~produced_targets
+        ~can_go_in_shared_cache
+        ~loc
+        ~rule_digest
+        ~should_remove_write_permissions_on_generated_files
+        ~action
+        ~produced_targets
     =
     let config = Build_config.get () in
     let module Shared_cache = (val config.shared_cache) in
@@ -239,7 +233,7 @@ module Shared = struct
       ~can_go_in_shared_cache
       ~loc
       ~rule_digest
-      ~execution_parameters
+      ~should_remove_write_permissions_on_generated_files
       ~action
       ~produced_targets
   ;;

@@ -1,17 +1,4 @@
-open Stdune
 open Dune_sexp
-
-module Op : sig
-  type t =
-    | Eq
-    | Gt
-    | Gte
-    | Lte
-    | Lt
-    | Neq
-
-  val eval : t -> Ordering.t -> bool
-end
 
 (* Note that this type is defined separately from [_ Ast.t] so that its
    constructors are scoped within the [Blang] module, allowing us to construct
@@ -22,7 +9,7 @@ type 'string ast =
   | Expr of 'string
   | And of 'string ast list
   | Or of 'string ast list
-  | Compare of Op.t * 'string * 'string
+  | Compare of Relop.t * 'string * 'string
 
 type t = String_with_vars.t ast
 
@@ -31,6 +18,7 @@ val false_ : t
 val to_dyn : t -> Dyn.t
 val decode : t Decoder.t
 val encode : t Encoder.t
+val equal : t -> t -> bool
 
 module Ast : sig
   type 'string t = 'string ast
@@ -38,6 +26,16 @@ module Ast : sig
   val true_ : 'string t
   val false_ : 'string t
   val to_dyn : 'string Dyn.builder -> 'string t -> Dyn.t
-  val decode : 'string Decoder.t -> 'string t Decoder.t
+
+  (** The [override_decode_bare_literal] argument is an alternative parser that
+      if provided, will be used to parse string literals for the [Expr _]
+      constructor. This is intended to prevent infinite recursion when parsing
+      blangs whose ['string] type is another DSL which is mutually recursive
+      with blang (e.g. slang). *)
+  val decode
+    :  override_decode_bare_literal:'string Decoder.t option
+    -> 'string Decoder.t
+    -> 'string t Decoder.t
+
   val encode : 'string Encoder.t -> 'string t Encoder.t
 end

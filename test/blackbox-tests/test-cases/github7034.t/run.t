@@ -16,12 +16,8 @@ It builds on its own (with a warning) when lang dune is 3.2 or below:
   $ dune printenv --root=inner --field flags
   Entering directory 'inner'
   (flags
-   (-w
-    @1..3@5..28@30..39@43@46..47@49..57@61..62-40
-    -strict-sequence
-    -strict-formats
-    -short-paths
-    -keep-locs))
+   (-w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence
+    -strict-formats -short-paths -keep-locs))
   Leaving directory 'inner'
   $ dune build --root=inner
   Entering directory 'inner'
@@ -41,12 +37,8 @@ Note that in versions of lang dune above 3.2 this warning becomes an error:
   $ dune printenv --root=inner --field flags
   Entering directory 'inner'
   (flags
-   (-w
-    @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40
-    -strict-sequence
-    -strict-formats
-    -short-paths
-    -keep-locs))
+   (-w @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40 -strict-sequence
+    -strict-formats -short-paths -keep-locs))
   Leaving directory 'inner'
   $ dune build --root=inner
   Entering directory 'inner'
@@ -68,12 +60,8 @@ Building the outer project works when lang dune is 3.2 or below:
   $ dune printenv --root=outer --field flags
   Entering directory 'outer'
   (flags
-   (-w
-    @1..3@5..28@30..39@43@46..47@49..57@61..62-40
-    -strict-sequence
-    -strict-formats
-    -short-paths
-    -keep-locs))
+   (-w @1..3@5..28@30..39@43@46..47@49..57@61..62-40 -strict-sequence
+    -strict-formats -short-paths -keep-locs))
   Leaving directory 'outer'
 
   $ dune build --root=outer
@@ -89,21 +77,25 @@ But when lang dune is 3.3 or higher the warning becomes an error:
   $ dune printenv --root=outer --field flags
   Entering directory 'outer'
   (flags
-   (-w
-    @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40
-    -strict-sequence
-    -strict-formats
-    -short-paths
-    -keep-locs))
+   (-w @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40 -strict-sequence
+    -strict-formats -short-paths -keep-locs))
   Leaving directory 'outer'
+  $ dune printenv outer/vendored/inner --root=outer --field flags
+  Entering directory 'outer'
+  (flags
+   (-w @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40 -strict-sequence
+    -strict-formats -short-paths -keep-locs))
+  Leaving directory 'outer'
+
   $ dune build --root=outer
   Entering directory 'outer'
-  File "vendored/inner/inner.ml", line 6, characters 11-18:
-  6 | type t = { x : int }
-                 ^^^^^^^
-  Error (warning 69 [unused-field]): unused record field x.
   Leaving directory 'outer'
-  [1]
+  $ pat="\-o [./a-zA-Z_]\{1,\}.cmx"
+  $ log=outer/_build/log
+  $ grep -o "$pat" $log | sort
+  -o .outer.eobjs/native/dune__exe__Outer.cmx
+  $ grep "$pat" $log | sort | grep -n -E -o "\-w [^ ]+"
+  1:-w @1..3@5..28@30..39@43@46..47@49..57@61..62@67@69-40
 
 This is unexpected as vendored projects should be built according to their
 declared dune-project rather than the dune-project of the outer project.

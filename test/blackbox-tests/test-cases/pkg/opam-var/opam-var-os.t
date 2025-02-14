@@ -37,4 +37,21 @@ We write all the dune values to a file and then diff them with the output of opa
 
 The two files should be identical.
 
-  $ diff --label="opam-vars"  opam-vars --label="dune-vars" dune-vars 
+  $ diff --label="opam-vars"  opam-vars --label="dune-vars" dune-vars
+
+Getting the sys-ocaml-version variable consistent is rather annoying because it
+depends on whether we have a system installed OCaml. So we just test it
+separately here:
+
+  $ mkpkg testpkg <<EOF
+  > build: [
+  >   ["echo" sys-ocaml-version]
+  > ]
+  > EOF
+  > solve testpkg
+  Solution for dune.lock:
+  - testpkg.0.0.1
+
+  $ ocaml_version="$(ocaml -vnum)"
+  $ build_pkg testpkg 2>&1 | sed "s/$ocaml_version/OCAML_VERSION/g"
+  OCAML_VERSION

@@ -8,11 +8,11 @@ TODO: versioning will be added once this feature is stable
   > (lang dune 3.8)
   > (context
   >  (default
-  >   (lock foo.lock)))
+  >   (lock_dir foo.lock)))
   > (context
   >  (default
   >   (name foo)
-  >   (lock bar.lock)))
+  >   (lock_dir bar.lock)))
   > EOF
 
   $ mkdir foo.lock
@@ -21,6 +21,7 @@ TODO: versioning will be added once this feature is stable
   > (repositories (complete true))
   > EOF
   $ cat >foo.lock/test.pkg <<EOF
+  > (version 0.0.1)
   > (build
   >  (system "echo building from %{context_name}"))
   > EOF
@@ -28,4 +29,3 @@ TODO: versioning will be added once this feature is stable
 
   $ build_pkg test
   building from default
-  building from foo

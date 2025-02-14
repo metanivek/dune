@@ -2,6 +2,15 @@
 Command-Line Interface
 **********************
 
+.. TODO(diataxis)
+
+   There are mixed types of contents in this document, including:
+
+   - an how-to about ``dune init``
+   - reference info about finding the root and libraries
+   - reference info about the CLI
+   - how-to info about overriding what ``dune build`` does
+
 This section describes using ``dune`` from the shell.
 
 .. _initializing_components:
@@ -24,7 +33,7 @@ Initializing a Project
 You can run the following command to initialize a new Dune project that uses the ``base`` and ``cmdliner``
 libraries and supports inline tests:
 
-.. code:: bash
+.. code:: console
 
    $ dune init proj myproj --libs base,cmdliner --inline-tests --ppx ppx_inline_test
 
@@ -41,7 +50,7 @@ Initializing an Executable
 To add a new executable to a ``dune`` file in the current directory
 (creating the file if necessary), run
 
-.. code:: bash
+.. code:: console
 
     $ dune init exe myexe --libs base,containers,notty --ppx ppx_deriving
 
@@ -60,7 +69,7 @@ Initializing a Library
 
 Run the following command to create a new directory ``src``, initialized as a library:
 
-.. code:: bash
+.. code:: console
 
     $ dune init lib mylib src --libs core --inline-tests --public
 
@@ -77,7 +86,31 @@ the file and directory, if necessary):
      (preprocess
       (pps ppx_inline_tests)))
 
-Consult the manual page using the ``dune init --help`` command for more details.
+Initializing Components in a Specified Directory
+------------------------------------------------
+
+All ``init`` subcommands take an optional ``PATH`` argument, which should be a
+path to a directory. When supplied, the component will be created in the
+specified directory. E.g., to initialize a project in the current working
+directory, run
+
+.. code:: console
+
+    $ dune init proj my_proj .
+
+To initialize a project in a directory in some nested path, run
+
+.. code:: console
+
+    $ dune init proj my_proj path/to/my/project
+
+If the specified directory does not already exist, it will be created.
+
+Learning More About the ``init`` Commands
+-----------------------------------------
+
+Consult the manual page using the ```dune init --help`` command for more
+details.
 
 .. _finding-root:
 
@@ -90,7 +123,7 @@ parent directories. Dune requires at least one of these two files to operate.
 
 If it isn't in the current directory, Dune prints out the root when starting:
 
-.. code:: bash
+.. code:: console
 
     $ dune runtest
     Entering directory '/home/jdimino/code/dune'
@@ -110,16 +143,16 @@ file is found, only parent ``dune-workspace`` files will be considered when
 looking for the root; however, if a `dune-project` file is found both parent
 ``dune-workspace`` and ``dune-project`` files will be considered.
 
-A ``dune-workspace`` file is also a configuration file. Dune will read
-it unless the ``--workspace`` command line option is used.  See the
-section :ref:`dune-workspace` for the syntax of this file. The scope
-of ``dune-project`` files is wider than the scope ``dune-workspace``
-files. For instance, a ``dune-project`` file may specify the name of
-the project which is a universal property of the project, while a
-``dune-workspace`` file may specify an opam switch name which is valid
-only on a given machine. For this reason, it is common and recommended
-to commit ``dune-project`` files in repositories, while it is less
-common to commit ``dune-workspace`` files.
+A ``dune-workspace`` file is also a configuration file. Dune will read it
+unless the ``--workspace`` command line option is used. See
+:doc:`/reference/dune-workspace/index` for the syntax of this file. The
+scope of ``dune-project`` files is wider than the scope ``dune-workspace``
+files. For instance, a ``dune-project`` file may specify the name of the
+project which is a universal property of the project, while a
+``dune-workspace`` file may specify an opam switch name which is valid only on
+a given machine. For this reason, it is common and recommended to commit
+``dune-project`` files in repositories, while it is less common to commit
+``dune-workspace`` files.
 
 
 Current Directory
@@ -144,7 +177,7 @@ Interpretation of Targets
 
 This section describes how Dune interprets the targets provided on
 the command line. When no targets are specified, Dune builds the
-:ref:`default alias <default-alias>`.
+:doc:`default alias </reference/aliases/default>`.
 
 Resolution
 ----------
@@ -157,7 +190,7 @@ tools. These includes ``<package>.install`` files when either ``-p`` or
 As a result, if you want to ask Dune to produce a particular ``.exe``
 file you would have to type:
 
-.. code:: bash
+.. code:: console
 
     $ dune build _build/default/bin/prog.exe
 
@@ -167,7 +200,7 @@ corresponding target in all the build contexts that Dune knows how to
 build. When using ``--verbose``, it prints out the actual set of
 targets upon starting:
 
-.. code:: bash
+.. code:: console
 
     $ dune build bin/prog.exe --verbose
     ...
@@ -225,7 +258,7 @@ Running Tests
 There are two ways to run tests:
 
 -  ``dune build @runtest``
--  ``dune test`` (or the more explicit ``dune runtest``)
+-  ``dune test`` (or its alias ``dune runtest``)
 
 The two commands are equivalent, and they will run all the tests defined in the
 current directory and its children directories recursively. You can also run the tests in a
@@ -248,7 +281,7 @@ Launching the Toplevel (REPL)
 Dune supports launching a `utop <https://github.com/diml/utop>`__ instance
 with locally defined libraries loaded.
 
-.. code:: bash
+.. code:: console
 
    $ dune utop <dir> -- <args>
 
@@ -262,7 +295,7 @@ Dune also supports loading individual modules unsealed by their signatures into
 the toplevel. This is accomplished by launching a toplevel and then asking dune
 to return the toplevel directives needed to evaluate the module:
 
-.. code:: bash
+.. code:: console
 
    $ utop
    # use_output "dune ocaml top-module path/to/module.ml";;
@@ -283,7 +316,7 @@ Restricting the Set of Packages
 Restrict the set of packages from your workspace that Dune can see with
 the ``--only-packages`` option:
 
-.. code:: bash
+.. code:: console
 
     $ dune build --only-packages pkg1,pkg2,... @install
 
@@ -309,8 +342,8 @@ must be prefixed by the shortest one.
 
 .. _dune-subst:
 
-dune subst
-==========
+``dune subst``
+==============
 
 One of the features ``dune-release`` provides is watermarking; it replaces
 various strings of the form ``%%ID%%`` in all your project files
@@ -320,7 +353,7 @@ This is especially interesting for the ``VERSION`` watermark, which gets
 replaced by the version obtained from the Version-Control System (VCS). For instance, if you're using
 Git, ``dune-release`` invokes this command to find out the version:
 
-.. code:: bash
+.. code:: console
 
     $ git describe --always --dirty --abbrev=7
     1.0+beta9-79-g29e9b37
@@ -369,7 +402,7 @@ By default Dune places all build artifacts in the ``_build`` directory relative
 to the user's workspace. However, one can customize this directory by using the
 ``--build-dir`` flag or the ``DUNE_BUILD_DIR`` environment variable.
 
-.. code:: bash
+.. code:: console
 
    $ dune build --build-dir _build-foo
 
@@ -397,15 +430,15 @@ When not using opam, or when you want to manually install a package,
 you can ask Dune to perform the installation via the ``install``
 command:
 
-::
+.. code:: console
 
     $ dune install [PACKAGE]...
 
 This command takes a list of package names to install.  If no packages
 are specified, Dune will install all available packages in the
 workspace.  When several build contexts are specified via a
-:ref:`dune-workspace` file, Dune performs the installation in all the
-build contexts.
+:doc:`/reference/dune-workspace/index` file, Dune performs the
+installation in all the build contexts.
 
 Destination Directory
 ---------------------
@@ -451,7 +484,7 @@ Printing the Configuration
 It's possible to manually query the generated configuration for debugging
 purposes:
 
-::
+.. code:: console
 
     $ dune ocaml merlin dump-config
 
@@ -466,7 +499,7 @@ Printing an Approximated ``.merlin``
 It's also possible to print the current folder's configuration in the
 Merlin configuration syntax by running the following command:
 
-::
+.. code:: console
 
     $ dune ocaml dump-dot-merlin > .merlin
 

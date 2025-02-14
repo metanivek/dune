@@ -45,6 +45,7 @@ module Item = struct
   type t =
     | File
     | Directory of { perms : int }
+    | Link
     | Other of Unix.file_kind
 
   let of_path path =
@@ -59,6 +60,7 @@ module Item = struct
     match kind with
     | S_DIR -> Directory { perms = (Path.Untracked.stat_exn path).st_perm }
     | S_REG -> File
+    | S_LNK -> Link
     | _ -> Other kind
   ;;
 end
@@ -71,6 +73,12 @@ let copy_recursively =
   in
   let rec loop item ~src ~dst =
     match (item : Item.t) with
+    | Link ->
+      (match Path.Untracked.stat_exn src with
+       | { Unix.st_kind = S_REG; _ } -> Io.copy_file ~chmod:chmod_file ~src ~dst ()
+       | { Unix.st_kind = S_DIR; st_perm = perms; _ } ->
+         loop (Directory { perms }) ~src ~dst
+       | { Unix.st_kind; _ } -> loop (Other st_kind) ~src ~dst)
     | File -> Io.copy_file ~chmod:chmod_file ~src ~dst ()
     | Directory { perms } ->
       (match Path.Untracked.readdir_unsorted_with_kinds src with
@@ -97,9 +105,11 @@ let copy_recursively =
   loop
 ;;
 
-let create_dirs t ~deps ~rule_dir =
-  Path.Build.Set.add (Dep.Facts.necessary_dirs_for_sandboxing deps) rule_dir
-  |> Path.Build.Set.iter ~f:(fun path -> Path.mkdir_p (Path.build (map_path t path)))
+let create_dir t dir = Path.mkdir_p (Path.build (map_path t dir))
+
+let create_dirs t ~dirs ~rule_dir =
+  create_dir t rule_dir;
+  Path.Build.Set.iter dirs ~f:(fun dir -> create_dir t dir)
 ;;
 
 let link_function ~(mode : Sandbox_mode.some) =
@@ -137,7 +147,7 @@ let link_function ~(mode : Sandbox_mode.some) =
 
 let link_deps t ~mode ~deps =
   let link = Staged.unstage (link_function ~mode) in
-  Path.Map.iteri deps ~f:(fun path (_ : Digest.t) ->
+  Path.Set.iter deps ~f:(fun path ->
     match Path.as_in_build_dir path with
     | None ->
       (* This can actually raise if we try to sandbox the "copy from source
@@ -170,7 +180,7 @@ let snapshot t =
   walk (Path.build t.dir) Path.Map.empty
 ;;
 
-let create ~mode ~dune_stats ~rule_loc ~deps ~rule_dir ~rule_digest ~expand_aliases =
+let create ~mode ~dune_stats ~rule_loc ~dirs ~deps ~rule_dir ~rule_digest =
   let event =
     Dune_stats.start dune_stats (fun () ->
       let cat = Some [ "create-sandbox" ] in
@@ -188,14 +198,9 @@ let create ~mode ~dune_stats ~rule_loc ~deps ~rule_dir ~rule_digest ~expand_alia
   let+ () =
     maybe_async (fun () ->
       Path.rm_rf (Path.build sandbox_dir);
-      create_dirs t ~deps ~rule_dir;
+      create_dirs t ~dirs ~rule_dir;
       (* CR-someday amokhov: Note that this doesn't link dynamic dependencies, so
          targets produced dynamically will be unavailable. *)
-      let deps =
-        if expand_aliases
-        then Dep.Facts.paths deps
-        else Dep.Facts.paths_without_expanding_aliases deps
-      in
       link_deps t ~mode ~deps)
   in
   Dune_stats.finish event;
@@ -236,53 +241,6 @@ let rename_optional_file ~src ~dst =
      | () -> ())
 ;;
 
-(* Recursively collect regular files from [src] to [dst] and return the set of
-   of files collected. *)
-let collect_dir_recursively ~loc ~src_dir ~dst_dir =
-  let rec loop ~src_dir ~dst_dir =
-    match
-      Dune_filesystem_stubs.read_directory_with_kinds (Path.Build.to_string src_dir)
-    with
-    | Ok files ->
-      List.map files ~f:(fun (file, kind) ->
-        match (kind : File_kind.t) with
-        | S_LNK
-          (* TODO symlinks outside of the sandbox are going to be broken,
-             but users shouldn't be doing this anyway. *)
-        | S_REG -> Appendable_list.singleton (dst_dir, file)
-        | S_DIR ->
-          loop
-            ~src_dir:(Path.Build.relative src_dir file)
-            ~dst_dir:(Path.Build.relative dst_dir file)
-        | _ ->
-          User_error.raise
-            ~loc
-            [ Pp.textf
-                "Rule produced a file with unrecognised kind %S"
-                (File_kind.to_string kind)
-            ])
-      |> Appendable_list.concat
-    | Error (ENOENT, _, _) ->
-      User_error.raise
-        ~loc
-        [ Pp.textf
-            "Rule failed to produce directory %S"
-            (Path.Build.drop_build_context_maybe_sandboxed_exn src_dir
-             |> Path.Source.to_string_maybe_quoted)
-        ]
-    | Error (unix_error, _, _) ->
-      User_error.raise
-        ~loc
-        [ Pp.textf
-            "Rule produced unreadable directory %S"
-            (Path.Build.drop_build_context_maybe_sandboxed_exn src_dir
-             |> Path.Source.to_string_maybe_quoted)
-        ; Pp.verbatim (Unix.error_message unix_error)
-        ]
-  in
-  loop ~src_dir ~dst_dir
-;;
-
 let apply_changes_to_source_tree t ~old_snapshot =
   let new_snapshot = snapshot t in
   (* Same as promotion: make the file writable when copying to the source
@@ -321,19 +279,19 @@ let hint_delete_dir =
   ]
 ;;
 
-let move_targets_to_build_dir t ~loc ~should_be_skipped ~(targets : Targets.Validated.t)
-  : unit Targets.Produced.t Fiber.t
+let move_targets_to_build_dir t ~should_be_skipped ~(targets : Targets.Validated.t)
+  : unit Fiber.t
   =
   maybe_async (fun () ->
     Option.iter t.snapshot ~f:(fun old_snapshot ->
       apply_changes_to_source_tree t ~old_snapshot);
-    Path.Build.Set.iter targets.files ~f:(fun target ->
-      if not (should_be_skipped target)
-      then rename_optional_file ~src:(map_path t target) ~dst:target);
-    let discovered_targets =
-      Path.Build.Set.to_list_map targets.dirs ~f:(fun target ->
+    Targets.Validated.iter
+      targets
+      ~file:(fun target ->
+        if not (should_be_skipped target)
+        then rename_optional_file ~src:(map_path t target) ~dst:target)
+      ~dir:(fun target ->
         let src_dir = map_path t target in
-        let files = collect_dir_recursively ~loc ~src_dir ~dst_dir:target in
         (match Path.Untracked.stat (Path.build target) with
          | Error (Unix.ENOENT, _, _) -> ()
          | Error e ->
@@ -354,12 +312,8 @@ let move_targets_to_build_dir t ~loc ~should_be_skipped ~(targets : Targets.Vali
                  (Path.Build.to_string_maybe_quoted target)
                  (File_kind.to_string_hum st_kind)
              ]);
-        Path.rename (Path.build src_dir) (Path.build target);
-        files)
-      |> Appendable_list.concat
-      |> Appendable_list.to_list
-    in
-    Targets.Produced.expand_validated_exn targets discovered_targets)
+        if Path.Untracked.exists (Path.build src_dir)
+        then Path.rename (Path.build src_dir) (Path.build target)))
 ;;
 
 let failed_to_delete_sandbox dir reason =

@@ -1,7 +1,6 @@
 (** A collection of rules across a known finite set of directories *)
 
 open! Import
-module Action_builder := Action_builder0
 
 (** Represent a set of rules producing files in a given directory *)
 module Dir_rules : sig
@@ -26,8 +25,7 @@ module Dir_rules : sig
 
            When passing [--force] to Dune, these are exactly the actions that
            will be re-executed. *)
-        Action of
-          Rule.Anonymous_action.t Action_builder.t
+        Action of Rule.Anonymous_action.t Action_builder.t
 
     type t = { expansions : (Loc.t * item) Appendable_list.t } [@@unboxed]
   end

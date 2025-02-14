@@ -188,22 +188,22 @@ let test_with_multiple_fsevents ~setup ~test:f =
     let (t : Thread.t) =
       Thread.create
         (fun () ->
-          let rec await ~emit ~continue = function
-            | [] -> ()
-            | xs ->
-              List.iter xs ~f:emit;
-              Unix.sleepf 0.2;
-              await ~emit ~continue (List.filter xs ~f:continue)
-          in
-          await
-            ~emit:(fun sync -> sync#emit_start)
-            ~continue:(fun sync -> not sync#started)
-            syncs;
-          f ();
-          await
-            ~emit:(fun sync -> sync#emit_stop)
-            ~continue:(fun sync -> not sync#stopped)
-            syncs)
+           let rec await ~emit ~continue = function
+             | [] -> ()
+             | xs ->
+               List.iter xs ~f:emit;
+               Unix.sleepf 0.2;
+               await ~emit ~continue (List.filter xs ~f:continue)
+           in
+           await
+             ~emit:(fun sync -> sync#emit_start)
+             ~continue:(fun sync -> not sync#started)
+             syncs;
+           f ();
+           await
+             ~emit:(fun sync -> sync#emit_stop)
+             ~continue:(fun sync -> not sync#stopped)
+             syncs)
         ()
     in
     (match Fsevents.Dispatch_queue.wait_until_stopped dispatch_queue with
@@ -232,7 +232,7 @@ let%expect_test "file create event" =
   test_with_operations (fun () -> Io.String_path.write_file "./file" "foobar");
   [%expect
     {|
-    > { action = "Unknown"; kind = "File"; path = "$TESTCASE_ROOT/file" } |}]
+    > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/file" } |}]
 ;;
 
 let%expect_test "dir create event" =
@@ -248,8 +248,8 @@ let%expect_test "move file" =
     Unix.rename "old" "new");
   [%expect
     {|
-    > { action = "Unknown"; kind = "File"; path = "$TESTCASE_ROOT/old" }
-    > { action = "Unknown"; kind = "File"; path = "$TESTCASE_ROOT/new" } |}]
+    > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/old" }
+    > { action = "Rename"; kind = "File"; path = "$TESTCASE_ROOT/new" } |}]
 ;;
 
 let%expect_test "raise inside callback" =
@@ -258,9 +258,13 @@ let%expect_test "raise inside callback" =
       Logger.printfn logger "exiting.";
       raise Exit)
     (fun () ->
-      Io.String_path.write_file "old" "foobar";
-      Io.String_path.write_file "old" "foobar");
-  [%expect {|
+       Io.String_path.write_file "old" "foobar";
+       Io.String_path.write_file "old" "foobar";
+       (* Delay to allow the event handler callback to catch the exception
+         before stopping the watcher. *)
+       Unix.sleepf 1.0);
+  [%expect
+    {|
     [EXIT]
     exiting. |}]
 ;;
@@ -271,21 +275,20 @@ let%expect_test "set exclusion paths" =
     test_with_operations
       ~exclusion_paths:(fun cwd -> [ paths cwd ignored ])
       (fun () ->
-        let (_ : Fpath.mkdir_p_result) = Fpath.mkdir_p ignored in
-        Io.String_path.write_file (Filename.concat ignored "old") "foobar")
+         let (_ : Fpath.mkdir_p_result) = Fpath.mkdir_p ignored in
+         Io.String_path.write_file (Filename.concat ignored "old") "foobar")
   in
   (* absolute paths work *)
   run Filename.concat;
   [%expect
     {|
-    > { action = "Create"; kind = "Dir"; path = "$TESTCASE_ROOT/ignored" }
-    > { action = "Unknown"; kind = "File"; path = "$TESTCASE_ROOT/ignored/old" } |}];
+    > { action = "Create"; kind = "Dir"; path = "$TESTCASE_ROOT/ignored" } |}];
   (* but relative paths do not *)
   run (fun _ name -> name);
   [%expect
     {|
     > { action = "Create"; kind = "Dir"; path = "$TESTCASE_ROOT/ignored" }
-    > { action = "Unknown"; kind = "File"; path = "$TESTCASE_ROOT/ignored/old" } |}]
+    > { action = "Create"; kind = "File"; path = "$TESTCASE_ROOT/ignored/old" } |}]
 ;;
 
 let%expect_test "multiple fsevents" =

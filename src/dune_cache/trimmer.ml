@@ -2,16 +2,21 @@ open Stdune
 open Dune_cache_storage
 
 module Trimming_result = struct
-  type t = { trimmed_bytes : int64 }
+  type t =
+    { trimmed_bytes : int64
+    ; number_of_files_removed : int
+    }
 
-  let empty = { trimmed_bytes = 0L }
+  let empty = { trimmed_bytes = 0L; number_of_files_removed = 0 }
 
   (* CR-someday amokhov: Right now Dune doesn't support large (>1Gb) files on
      32-bit platforms due to the pervasive use of [int] for representing
      individual file sizes. It's not fundamentally difficult to switch to
      [int64], so we should do it if it becomes a real issue. *)
   let add t ~(bytes : int) =
-    { trimmed_bytes = Int64.add t.trimmed_bytes (Int64.of_int bytes) }
+    { trimmed_bytes = Int64.add t.trimmed_bytes (Int64.of_int bytes)
+    ; number_of_files_removed = t.number_of_files_removed + 1
+    }
   ;;
 end
 
@@ -44,11 +49,12 @@ let trim_broken_metadata_entries ~trimmed_so_far =
                     keep them untrimmed for now. *)
                  false
                | Metadata.Artifacts { entries; _ } ->
-                 List.exists
-                   entries
-                   ~f:(fun { Artifacts.Metadata_entry.file_digest; _ } ->
+                 List.exists entries ~f:(function
+                   | { Artifacts.Metadata_entry.digest = Some file_digest; path = _ } ->
                      let reference = file_path ~file_digest in
-                     not (Path.exists reference)))
+                     not (Path.exists reference)
+                     (* no digest means it's a directory. *)
+                   | { digest = None; path = _ } -> false))
           in
           match should_be_removed with
           | true ->

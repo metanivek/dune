@@ -2,7 +2,6 @@ include Stdune
 include Dune_vcs
 module Console = Dune_console
 module Digest = Dune_digest
-module Section = Install.Section
 
 include struct
   open Dune_findlib.Findlib
@@ -29,7 +28,6 @@ include struct
   module Dir_set = Dir_set
   module Rule = Rule
   module Rules = Rules
-  module Action_builder = Action_builder
   module Build_system = Build_system
   module Context_name = Context_name
   module Dpath = Dpath
@@ -90,6 +88,20 @@ include struct
   module Binary_kind = Binary_kind
   module Visibility = Visibility
   module Dep_conf = Dep_conf
+  module Package_version = Package_version
+  module Relop = Relop
+  module Package_variable_name = Package_variable_name
+  module Toggle = Toggle
+  module Site = Site
+  module Warning = Warning
+  module Source_kind = Source_kind
+  module Package_info = Package_info
+  module Section = Section
+  module Package_dependency = Package_dependency
+  module Package_constraint = Package_constraint
+  module Dune_project_name = Dune_project_name
+  module Package = Package
+  module Dialect = Dialect
 end
 
 include Dune_engine.No_io
@@ -101,9 +113,9 @@ module Build_config = struct
     module Rules = Rules
 
     let make
-      ?(build_dir_only_sub_dirs = Rules.empty.build_dir_only_sub_dirs)
-      ?(directory_targets = Rules.empty.directory_targets)
-      rules
+          ?(build_dir_only_sub_dirs = Rules.empty.build_dir_only_sub_dirs)
+          ?(directory_targets = Rules.empty.directory_targets)
+          rules
       =
       let rules = { Rules.build_dir_only_sub_dirs; directory_targets; rules } in
       Gen_rules_result.rules_here rules
@@ -114,6 +126,32 @@ module Build_config = struct
     type result = Gen_rules_result.t
 
     module type Generator = Rule_generator
+
+    let rules_for ?directory_targets ~dir ~allowed_subdirs rules =
+      Rules.create
+        ?directory_targets
+        ~build_dir_only_sub_dirs:
+          (Build_only_sub_dirs.singleton ~dir (Subdir_set.of_set allowed_subdirs))
+        rules
+    ;;
+
+    let map_rules t ~f =
+      match t with
+      | Unknown_context -> Unknown_context
+      | Rules rules -> Rules (f rules)
+      | Redirect_to_parent rules -> Redirect_to_parent (f rules)
+    ;;
+
+    let combine x y =
+      match x, y with
+      | Unknown_context, _ -> Unknown_context
+      | _, Unknown_context -> Unknown_context
+      | Rules x, Rules y -> Rules (Rules.combine_exn x y)
+      | Rules x, Redirect_to_parent y -> Redirect_to_parent (Rules.combine_exn x y)
+      | Redirect_to_parent x, Rules y -> Redirect_to_parent (Rules.combine_exn x y)
+      | Redirect_to_parent x, Redirect_to_parent y ->
+        Redirect_to_parent (Rules.combine_exn x y)
+    ;;
   end
 
   let set = Build_config.set
@@ -121,3 +159,8 @@ end
 
 let phys_equal x y = x == y
 let ( == ) = `Use_phys_equal
+
+(** Controls whether we use background threads in the dune rules *)
+let background_dune_rules =
+  Config.make ~name:"background_dune_rules" ~of_string:Toggle.of_string ~default:`Disabled
+;;

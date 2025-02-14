@@ -4,7 +4,8 @@ let doc = "Execute a command in a similar environment as if installation was per
 
 let man =
   [ `S "DESCRIPTION"
-  ; `P {|$(b,dune exec -- COMMAND) should behave in the same way as if you
+  ; `P
+      {|$(b,dune exec -- COMMAND) should behave in the same way as if you
           do:|}
   ; `Pre "  \\$ dune install\n  \\$ COMMAND"
   ; `P
@@ -52,7 +53,8 @@ module Cmd_arg = struct
     | Terminal s -> Memo.return s
     | Expandable (sw, _) ->
       let+ path, _ =
-        Action_builder.run (Target.expand_path_from_root root sctx sw) Eager
+        Target.expand_path_from_root root sctx sw
+        |> Action_builder.evaluate_and_collect_facts
       in
       let context = Dune_rules.Super_context.context sctx in
       (* TODO Why are we stringifying this path? *)
@@ -66,31 +68,44 @@ module Command_to_exec = struct
   (* A command to execute, which knows how to (re)build the program and then
      run it with some arguments in an environment *)
 
+  type command_env =
+    { path : Path.t
+    ; env : Env.t
+    }
+
   type t =
-    { get_path_and_build_if_necessary :
-        string -> (Path.t, [ `Already_reported ]) result Fiber.t
+    { get_env_and_build_if_necessary :
+        string -> (command_env, [ `Already_reported ]) result Fiber.t
     ; prog : string
     ; args : string list
-    ; env : Env.t
     }
 
   (* Helper function to spawn a new process running a command in an
      environment, returning the new process' pid *)
-  let spawn_process path ~args ~env =
+  let spawn_process ~root path ~args ~env =
     let pid =
-      let path = Path.to_string path in
+      let prog = string_path_relative_to_specified_root root (Path.to_string path) in
       let env = Env.to_unix env |> Spawn.Env.of_list in
-      let argv = path :: args in
-      Spawn.spawn ~prog:path ~env ~argv ()
+      let argv = prog :: args in
+      let cwd = Spawn.Working_dir.Path Fpath.initial_cwd in
+      Spawn.spawn ~prog ~env ~cwd ~argv ()
     in
     Pid.of_int pid
   ;;
 
   (* Run the command, first (re)building the program which the command is
      invoking *)
-  let build_and_run_in_child_process { get_path_and_build_if_necessary; prog; args; env } =
-    get_path_and_build_if_necessary prog
-    |> Fiber.map ~f:(Result.map ~f:(spawn_process ~args ~env))
+  let build_and_run_in_child_process
+        ~root
+        ~config
+        { get_env_and_build_if_necessary; prog; args }
+    =
+    get_env_and_build_if_necessary prog
+    |> Fiber.map
+         ~f:
+           (Result.map ~f:(fun { path; env } ->
+              Scheduler.maybe_clear_screen ~details_hum:[] config;
+              spawn_process ~root ~args ~env path))
   ;;
 end
 
@@ -113,7 +128,7 @@ module Watch = struct
        cause pid reuse *)
     Unix.kill pid_int signal;
     let do_wait () =
-      Scheduler.wait_for_process ~timeout:1. pid
+      Scheduler.wait_for_process ~timeout_seconds:1. pid
       |> Fiber.map ~f:(fun (_ : Proc.Process_info.t) -> ())
     in
     let on_error (e : Exn_with_backtrace.t) =
@@ -137,18 +152,18 @@ module Watch = struct
 
   (* Kills the currently running process, then runs the given command after
      (re)building the program which it will invoke *)
-  let run state ~command_to_exec =
+  let run ~root ~config state ~command_to_exec =
     let open Fiber.O in
     let* () = Fiber.return () in
     let* () = kill_currently_running_process state in
     let* command_to_exec = command_to_exec () in
-    Command_to_exec.build_and_run_in_child_process command_to_exec
+    Command_to_exec.build_and_run_in_child_process ~root ~config command_to_exec
     >>| Result.map ~f:(fun pid -> state.currently_running_pid := Some pid)
   ;;
 
-  let loop ~command_to_exec =
+  let loop ~root ~config ~command_to_exec =
     let state = init_state () in
-    Scheduler.Run.poll (run state ~command_to_exec)
+    Scheduler.Run.poll (run ~root ~config state ~command_to_exec)
   ;;
 end
 
@@ -159,10 +174,14 @@ let build_prog ~no_rebuild ~prog p =
     then Memo.return p
     else
       User_error.raise
-        [ Pp.textf
-            "Program %S isn't built yet. You need to build it first or remove the \
-             --no-build option."
-            prog
+        [ Pp.concat
+            ~sep:Pp.space
+            [ Pp.text "Program"
+            ; User_message.command prog
+            ; Pp.text "isn't built yet. You need to build it first or remove the"
+            ; User_message.command "--no-build"
+            ; Pp.text "option."
+            ]
         ]
   else
     let open Memo.O in
@@ -179,41 +198,47 @@ let not_found ~dir ~prog =
        matching executable, they would be located in a subdirectory of
        [dir], so it's unclear if that's what the user wanted. *)
     let+ candidates =
-      Build_system.files_of ~dir:(Path.build dir)
-      >>| Path.Set.to_list
-      >>| List.filter ~f:(fun p -> Path.extension p = ".exe")
-      >>| List.map ~f:(fun p -> "./" ^ Path.basename p)
+      let+ filename_set = Build_system.files_of ~dir:(Path.build dir) in
+      Filename_set.filenames filename_set
+      |> Filename.Set.to_list
+      |> List.filter ~f:(fun filename -> Filename.extension filename = ".exe")
+      |> List.map ~f:(fun filename -> "./" ^ filename)
     in
     User_message.did_you_mean prog ~candidates
   in
-  User_error.raise ~hints [ Pp.textf "Program %S not found!" prog ]
+  User_error.raise
+    ~hints
+    [ Pp.concat
+        ~sep:Pp.space
+        [ Pp.text "Program"; User_message.command prog; Pp.text "not found!" ]
+    ]
 ;;
 
 let get_path_and_build_if_necessary sctx ~no_rebuild ~dir ~prog =
   let open Memo.O in
   match Filename.analyze_program_name prog with
   | In_path ->
-    Super_context.resolve_program sctx ~dir ~loc:None prog
+    Super_context.resolve_program_memo sctx ~dir ~loc:None prog
     >>= (function
-    | Error (_ : Action.Prog.Not_found.t) -> not_found ~dir ~prog
-    | Ok p -> build_prog ~no_rebuild ~prog p)
+     | Error (_ : Action.Prog.Not_found.t) -> not_found ~dir ~prog
+     | Ok p -> build_prog ~no_rebuild ~prog p)
   | Relative_to_current_dir ->
     let path = Path.relative_to_source_in_build_or_external ~dir prog in
     Build_system.file_exists path
     >>= (function
-          | true -> Memo.return (Some path)
-          | false ->
-            if not (Filename.check_suffix prog ".exe")
-            then Memo.return None
-            else (
-              let path = Path.extend_basename path ~suffix:".exe" in
-              Build_system.file_exists path
-              >>| function
-              | true -> Some path
-              | false -> None))
+     | true -> Memo.return (Some path)
+     | false ->
+       if not (Filename.check_suffix prog ".exe")
+       then Memo.return None
+       else (
+         let path = Path.extend_basename path ~suffix:".exe" in
+         Build_system.file_exists path
+         >>| function
+         | true -> Some path
+         | false -> None))
     >>= (function
-    | Some path -> build_prog ~no_rebuild ~prog path
-    | None -> not_found ~dir ~prog)
+     | Some path -> build_prog ~no_rebuild ~prog path
+     | None -> not_found ~dir ~prog)
   | Absolute ->
     (match
        let prog = Path.of_string prog in
@@ -253,7 +278,7 @@ module Exec_context = struct
       let context = Dune_rules.Super_context.context sctx in
       Path.Build.relative (Context.build_dir context) (Common.prefix_target common "")
     in
-    let env = Memo.map sctx ~f:Super_context.context_env in
+    let env = Memo.bind sctx ~f:Super_context.context_env in
     let get_path_and_build_if_necessary ~prog =
       let* sctx = sctx
       and+ dir = dir in
@@ -268,7 +293,7 @@ module Exec_context = struct
     let open Fiber.O in
     let* path, args, env =
       let* { sctx; env; prog; args; get_path_and_build_if_necessary } = t in
-      Build_system.run_exn (fun () ->
+      build_exn (fun () ->
         let open Memo.O in
         let* env = env
         and* sctx = sctx in
@@ -282,7 +307,7 @@ module Exec_context = struct
     in
     let prog = Path.to_string path in
     let argv = prog :: args in
-    restore_cwd_and_execve common prog argv env
+    restore_cwd_and_execve (Common.root common) prog argv env
   ;;
 
   let run_eager_watch t common config =
@@ -294,23 +319,24 @@ module Exec_context = struct
       Memo.run
       @@
       let open Memo.O in
-      let* env = env
-      and* sctx = sctx in
+      let* sctx = sctx in
       let expand = Cmd_arg.expand ~root:(Common.root common) ~sctx in
       let* prog = expand prog in
       let+ args = Memo.parallel_map args ~f:expand in
-      { Command_to_exec.get_path_and_build_if_necessary =
+      { Command_to_exec.get_env_and_build_if_necessary =
           (fun prog ->
             (* TODO we should release the dune lock. But we aren't doing it
                because we don't unload the database files we've marshalled.
             *)
-            Build_system.run (fun () -> get_path_and_build_if_necessary ~prog))
+            build (fun () ->
+              let+ env = env
+              and+ path = get_path_and_build_if_necessary ~prog in
+              { Command_to_exec.path; env }))
       ; prog
       ; args
-      ; env
       }
     in
-    Watch.loop ~command_to_exec
+    Watch.loop ~root:(Common.root common) ~config ~command_to_exec
   ;;
 end
 

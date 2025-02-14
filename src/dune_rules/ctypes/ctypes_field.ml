@@ -127,8 +127,8 @@ module Function_description = struct
 end
 
 let c_generated_functions_cout_c_of_lib
-  ~external_library_name
-  (fd : Function_description.t)
+      ~external_library_name
+      (fd : Function_description.t)
   =
   sprintf
     "%s__c_cout_generated_functions__%s__%s.c"
@@ -149,7 +149,11 @@ type t =
   ; version : Syntax.Version.t
   }
 
-type Stanza.t += T of t
+include Stanza.Make (struct
+    type nonrec t = t
+
+    include Poly
+  end)
 
 let decode =
   let open Dune_lang.Decoder in
@@ -198,7 +202,11 @@ let () =
   let open Dune_lang.Decoder in
   Dune_project.Extension.register_simple
     syntax
-    (return [ (name, decode >>| fun x -> [ T x ]) ])
+    (return
+       [ ( name
+         , let+ stanza = decode in
+           [ make_stanza stanza ] )
+       ])
 ;;
 
 let type_gen_script ctypes =
@@ -275,4 +283,10 @@ let generated_ml_and_c_files ctypes =
       c_generated_functions_cout_c ctypes fd)
   in
   ml_files @ c_files
+;;
+
+let has_stubs = function
+  | None -> false
+  | Some { function_description = []; _ } -> false
+  | _ -> true
 ;;

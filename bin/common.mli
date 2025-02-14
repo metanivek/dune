@@ -14,7 +14,6 @@ val rpc
      | `Forbid_builds (** Promise not to build anything. For now, this isn't checked *)
      ]
 
-val signal_watcher : t -> [ `Yes | `No ]
 val watch_exclusions : t -> string list
 val stats : t -> Dune_stats.t option
 val print_metrics : t -> bool
@@ -24,32 +23,22 @@ val dump_memo_graph_with_timing : t -> bool
 val watch : t -> Dune_rpc_impl.Watch_mode_config.t
 val file_watcher : t -> Dune_engine.Scheduler.Run.file_watcher
 val prefix_target : t -> string -> string
-val insignificant_changes : t -> [ `React | `Ignore ]
-
-module Action_runner : sig
-  type t =
-    | No
-    | Yes of
-        (Dune_lang.Dep_conf.t Dune_rpc_impl.Server.t
-         -> (Dune_engine.Action_exec.input -> Dune_engine.Action_runner.t option) Staged.t)
-end
 
 (** [Builder] describes how to initialize Dune. *)
 module Builder : sig
   type t
 
+  val root : t -> string option
   val set_root : t -> string -> t
   val forbid_builds : t -> t
+  val default_root_is_cwd : t -> bool
   val set_default_root_is_cwd : t -> bool -> t
-  val set_action_runner : t -> Action_runner.t -> t
   val set_log_file : t -> Dune_util.Log.File.t -> t
   val disable_log_file : t -> t
   val set_promote : t -> Dune_engine.Clflags.Promote.t -> t
   val default_target : t -> Arg.Dep.t
   val term : t Cmdliner.Term.t
 end
-
-val build : Builder.t -> t
 
 (** [init] creates a [Common.t] by executing a sequence of side-effecting actions to
     initialize Dune's working environment based on the options determined in the\
@@ -87,3 +76,7 @@ module Let_syntax : sig
   val ( let+ ) : 'a Cmdliner.Term.t -> ('a -> 'b) -> 'b Cmdliner.Term.t
   val ( and+ ) : 'a Cmdliner.Term.t -> 'b Cmdliner.Term.t -> ('a * 'b) Cmdliner.Term.t
 end
+
+(** [one_of term1 term2] allows options from [term1] or exclusively options from
+    [term2]. If the user passes options from both terms, an error is reported. *)
+val one_of : 'a Cmdliner.Term.t -> 'a Cmdliner.Term.t -> 'a Cmdliner.Term.t

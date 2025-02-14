@@ -68,7 +68,7 @@ Generate a mock opam repository
   > EOF
 
   $ build_single_package() {
-  > solve_project_translate_opam_filters <<EOF
+  > solve_project <<EOF
   > (lang dune 3.11)
   > (package
   >  (name x)
@@ -95,49 +95,44 @@ Generate a mock opam repository
   version greater than 0 (version is 0.0.1)
   disjunction with some undefined vars
   conjunction with some undefined vars
-  check if variable 'installed' is defined
   $ build_single_package baz
   Solution for dune.lock:
   - baz.0.0.1
   installed
   not madeup:installed
   hello
-  installed-defined
+  
   $ build_single_package error1
   Solution for dune.lock:
   - error1.0.0.1
-  File "dune.lock/error1.pkg", line 8, characters 30-43:
-  8 |      (or_absorb_undefined_var %{pkg-self:a} %{pkg-self:b})
-                                    ^^^^^^^^^^^^^
+  File "dune.lock/error1.pkg", line 6, characters 3-16:
+  6 |    %{pkg-self:a}
+         ^^^^^^^^^^^^^
   Error: Undefined package variable "a"
   [1]
   $ build_single_package error2
   Solution for dune.lock:
   - error2.0.0.1
-  File "dune.lock/error2.pkg", line 8, characters 31-44:
-  8 |      (and_absorb_undefined_var %{pkg-self:a} %{pkg-self:b})
-                                     ^^^^^^^^^^^^^
+  File "dune.lock/error2.pkg", line 6, characters 3-16:
+  6 |    %{pkg-self:a}
+         ^^^^^^^^^^^^^
   Error: Undefined package variable "a"
   [1]
   $ build_single_package error3
   Solution for dune.lock:
   - error3.0.0.1
-  File "dune.lock/error3.pkg", line 5, characters 2-46:
-  5 |   (when
-  6 |    (not
-  7 |     (< 2 1))
-  8 |    not-a-program)
+  File "dune.lock/error3.pkg", line 4, characters 6-19:
+  4 |  (run not-a-program echo hello))
+            ^^^^^^^^^^^^^
   Error: Program not-a-program not found in the tree or in PATH
    (context: default)
   [1]
   $ build_single_package error4
   Solution for dune.lock:
   - error4.0.0.1
-  File "dune.lock/error4.pkg", line 5, characters 2-63:
-  5 |   (when
-  6 |    (not
-  7 |     (< 2 1))
-  8 |    not-a-program-%{pkg-self:name})
+  File "dune.lock/error4.pkg", line 4, characters 6-36:
+  4 |  (run not-a-program-%{pkg-self:name} echo hello))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   Error: Program not-a-program-error4 not found in the tree or in PATH
    (context: default)
   [1]

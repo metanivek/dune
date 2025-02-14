@@ -1,5 +1,4 @@
 open Import
-module Action_builder = Action_builder0
 
 module Context_type = struct
   type t =
@@ -16,17 +15,17 @@ type rules = Rules.t
 module Rules = struct
   type t =
     { build_dir_only_sub_dirs : Build_only_sub_dirs.t
-        (** Sub-directories that don't exist in the source tree but exists in
-            the build directory. This is for internal directories such as
-            [.dune] or [.ppx]. *)
+      (** Sub-directories that don't exist in the source tree but exists in
+        the build directory. This is for internal directories such as
+        [.dune] or [.ppx]. *)
     ; directory_targets : Loc.t Path.Build.Map.t
-        (** Directories that are target of a rule. For each directory target,
-            give the location of the rule that generates it. The keys in this
-            map must correspond exactly to the set of directory targets that
-            will be produces by [rules]. The values should be the locations of
-            the rules that are going to produce these targets. However, it's
-            ok to have an approximate location as the rule that produces the
-            target will be responsible for producing the final location*)
+      (** Directories that are target of a rule. For each directory target,
+        give the location of the rule that generates it. The keys in this
+        map must correspond exactly to the set of directory targets that
+        will be produces by [rules]. The values should be the locations of
+        the rules that are going to produce these targets. However, it's
+        ok to have an approximate location as the rule that produces the
+        target will be responsible for producing the final location*)
     ; rules : rules Memo.t
     }
 end
@@ -61,7 +60,7 @@ module type Source_tree = sig
     type t
 
     val sub_dir_names : t -> Filename.Set.t
-    val file_paths : t -> Path.Source.Set.t
+    val filenames : t -> Filename.Set.t
   end
 
   val find_dir : Path.Source.t -> Dir.t option Memo.t
@@ -120,9 +119,7 @@ module type Build_config = sig
   (** Initialise the build system. This must be called before running the build
       system and only once. *)
   val set
-    :  action_runner:(Action_exec.input -> Action_runner.t option)
-    -> action_runners:(unit -> Action_runner.t list)
-    -> stats:Dune_stats.t option
+    :  stats:Dune_stats.t option
     -> contexts:(Build_context.t * Context_type.t) list Memo.Lazy.t
     -> promote_source:
          (chmod:(int -> int)
@@ -137,7 +134,7 @@ module type Build_config = sig
     -> implicit_default_alias:(Path.Build.t -> unit Action_builder.t option Memo.t)
     -> execution_parameters:(dir:Path.Build.t -> Execution_parameters.t Memo.t)
     -> source_tree:(module Source_tree)
-    -> shared_cache:(module Shared_cache_intf.S)
+    -> shared_cache:(module Dune_cache.Shared.S)
     -> write_error_summary:(Build_system_error.Set.t -> unit Fiber.t)
     -> unit
 
@@ -157,9 +154,7 @@ module type Build_config = sig
     ; implicit_default_alias : Path.Build.t -> unit Action_builder.t option Memo.t
     ; execution_parameters : dir:Path.Build.t -> Execution_parameters.t Memo.t
     ; source_tree : (module Source_tree)
-    ; action_runner : Action_exec.input -> Action_runner.t option
-    ; action_runners : unit -> Action_runner.t list
-    ; shared_cache : (module Shared_cache_intf.S)
+    ; shared_cache : (module Dune_cache.Shared.S)
     ; write_error_summary : Build_system_error.Set.t -> unit Fiber.t
     }
 

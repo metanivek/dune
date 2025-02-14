@@ -30,19 +30,25 @@ let info = Cmd.info "rules" ~doc ~man
 let print_rule_makefile ppf (rule : Dune_engine.Reflection.Rule.t) =
   let action =
     Action.For_shell.Progn
-      [ Mkdir (Path.to_string (Path.build rule.dir)); Action.for_shell rule.action ]
+      [ Mkdir (Path.to_string (Path.build rule.targets.root))
+      ; Action.for_shell rule.action
+      ]
   in
   (* Makefiles seem to allow directory targets, so we include them. *)
-  let targets = Path.Build.Set.union rule.targets.files rule.targets.dirs in
+  let targets =
+    Filename.Set.union rule.targets.files rule.targets.dirs
+    |> Filename.Set.to_list_map ~f:(fun basename ->
+      Path.Build.relative rule.targets.root basename |> Path.build)
+  in
   Format.fprintf
     ppf
     "@[<hov 2>@{<makefile-stuff>%a:%t@}@]@,@<0>\t@{<makefile-action>%a@}\n"
     (Format.pp_print_list ~pp_sep:Format.pp_print_space (fun ppf p ->
        Format.pp_print_string ppf (Path.to_string p)))
-    (List.map ~f:Path.build (Path.Build.Set.to_list targets))
+    targets
     (fun ppf ->
-      Path.Set.iter rule.expanded_deps ~f:(fun dep ->
-        Format.fprintf ppf "@ %s" (Path.to_string dep)))
+       Path.Set.iter rule.expanded_deps ~f:(fun dep ->
+         Format.fprintf ppf "@ %s" (Path.to_string dep)))
     Pp.to_fmt
     (Action_to_sh.pp action)
 ;;
@@ -62,7 +68,7 @@ let rec encode : Action.For_shell.t -> Dune_lang.t =
   | With_accepted_exit_codes (pred, t) ->
     List
       [ atom "with-accepted-exit-codes"
-      ; Predicate_lang.encode Dune_lang.Encoder.int pred
+      ; Predicate_lang.encode Dune_sexp.Encoder.int pred
       ; encode t
       ]
   | Dynamic_run (a, xs) -> List (atom "run_dynamic" :: program a :: List.map xs ~f:string)
@@ -85,50 +91,86 @@ let rec encode : Action.For_shell.t -> Dune_lang.t =
   | Copy (x, y) -> List [ atom "copy"; path x; target y ]
   | Symlink (x, y) -> List [ atom "symlink"; path x; target y ]
   | Hardlink (x, y) -> List [ atom "hardlink"; path x; target y ]
-  | System x -> List [ atom "system"; string x ]
   | Bash x -> List [ atom "bash"; string x ]
   | Write_file (x, perm, y) ->
     List [ atom ("write-file" ^ File_perm.suffix perm); target x; string y ]
   | Rename (x, y) -> List [ atom "rename"; target x; target y ]
   | Remove_tree x -> List [ atom "remove-tree"; target x ]
   | Mkdir x -> List [ atom "mkdir"; target x ]
-  | Diff { optional; file1; file2; mode = Binary } ->
-    assert (not optional);
-    List [ atom "cmp"; path file1; target file2 ]
-  | Diff { optional = false; file1; file2; mode = _ } ->
-    List [ atom "diff"; path file1; target file2 ]
-  | Diff { optional = true; file1; file2; mode = _ } ->
-    List [ atom "diff?"; path file1; target file2 ]
-  | Merge_files_into (srcs, extras, into) ->
-    List
-      [ atom "merge-files-into"
-      ; List (List.map ~f:path srcs)
-      ; List (List.map ~f:string extras)
-      ; target into
-      ]
   | Pipe (outputs, l) ->
     List (atom (sprintf "pipe-%s" (Outputs.to_string outputs)) :: List.map l ~f:encode)
-  | Extension ext -> List [ atom "ext"; ext ]
+  | Extension ext -> List [ atom "ext"; Dune_sexp.Quoted_string (Sexp.to_string ext) ]
+;;
+
+let encode_path p =
+  let make constr arg =
+    Dune_sexp.List [ Dune_sexp.atom constr; Dune_sexp.atom_or_quoted_string arg ]
+  in
+  let open Path in
+  match p with
+  | In_build_dir p -> make "In_build_dir" (Path.Build.to_string p)
+  | In_source_tree p -> make "In_source_tree" (Path.Source.to_string p)
+  | External p -> make "External" (Path.External.to_string p)
+;;
+
+let encode_file_selector file_selector =
+  let open Dune_sexp.Encoder in
+  let module File_selector = Dune_engine.File_selector in
+  let dir = File_selector.dir file_selector in
+  let predicate = File_selector.predicate file_selector in
+  let only_generated_files = File_selector.only_generated_files file_selector in
+  record
+    [ "dir", encode_path dir
+    ; "predicate", Predicate_lang.Glob.encode predicate
+    ; "only_generated_files", bool only_generated_files
+    ]
+;;
+
+let encode_alias alias =
+  let open Dune_sexp.Encoder in
+  let dir = Dune_engine.Alias.dir alias in
+  let name = Dune_engine.Alias.name alias in
+  record
+    [ "dir", encode_path (Path.build dir)
+    ; "name", Dune_sexp.atom_or_quoted_string (Dune_util.Alias_name.to_string name)
+    ]
+;;
+
+let encode_dep_set deps =
+  Dune_sexp.List
+    (Dep.Set.to_list_map
+       deps
+       ~f:
+         (let open Dune_sexp.Encoder in
+          function
+          | File_selector g -> pair string encode_file_selector ("glob", g)
+          | Env e -> pair string string ("Env", e)
+          | File f -> pair string encode_path ("File", f)
+          | Alias a -> pair string encode_alias ("Alias", a)
+          | Universe -> string "Universe"))
 ;;
 
 let print_rule_sexp ppf (rule : Dune_engine.Reflection.Rule.t) =
   let sexp_of_action action = Action.for_shell action |> encode in
   let paths ps =
-    Dune_lang.Encoder.list
-      (fun p -> Dune_sexp.atom_or_quoted_string (Path.Build.to_string p))
-      (Path.Build.Set.to_list ps)
+    Dune_sexp.Encoder.list
+      (fun p ->
+         Path.Build.relative rule.targets.root p
+         |> Path.Build.to_string
+         |> Dune_sexp.atom_or_quoted_string)
+      (Filename.Set.to_list ps)
   in
   let sexp =
-    Dune_lang.Encoder.record
+    Dune_sexp.Encoder.record
       (List.concat
-         [ [ "deps", Dep.Set.encode rule.deps
+         [ [ "deps", encode_dep_set rule.deps
            ; ( "targets"
-             , Dune_lang.Encoder.record
+             , Dune_sexp.Encoder.record
                  [ "files", paths rule.targets.files
                  ; "directories", paths rule.targets.dirs
                  ] )
            ]
-         ; (match Path.Build.extract_build_context rule.dir with
+         ; (match Path.Build.extract_build_context rule.targets.root with
             | None -> []
             | Some (c, _) -> [ "context", Dune_sexp.atom_or_quoted_string c ])
          ; [ "action", sexp_of_action rule.action ]
@@ -184,7 +226,7 @@ let term =
   Scheduler.go ~common ~config (fun () ->
     let open Fiber.O in
     let* setup = Import.Main.setup () in
-    Build_system.run_exn (fun () ->
+    build_exn (fun () ->
       let open Memo.O in
       let* setup = setup in
       let* request =

@@ -31,10 +31,9 @@ module Lock = struct
        let fd =
          Unix.openfile
            (Path.Build.to_string lock_file)
-           [ Unix.O_CREAT; O_WRONLY; O_SHARE_DELETE ]
+           [ Unix.O_CREAT; O_WRONLY; O_SHARE_DELETE; O_CLOEXEC ]
            0o600
        in
-       Unix.set_close_on_exec fd;
        Flock.create fd)
   ;;
 
@@ -53,11 +52,16 @@ module Lock = struct
      | `Failure -> ()
      | `Success ->
        let fd = Flock.fd t in
+       Unix.ftruncate fd 0;
        write_pid fd);
     res
   ;;
 
-  let unlock () = Lazy.force t |> Flock.unlock |> or_raise_unix ~name:"unlock"
+  let unlock () =
+    let lock = Lazy.force t in
+    Unix.ftruncate (Flock.fd lock) 0;
+    Flock.unlock lock |> or_raise_unix ~name:"unlock"
+  ;;
 end
 
 let locked = ref false
@@ -96,11 +100,10 @@ let lock_exn ~timeout =
 ;;
 
 let unlock () =
-  match Config.(get global_lock) with
-  | `Disabled -> ()
-  | `Enabled ->
-    if !locked
-    then (
-      Lock.unlock ();
-      locked := false)
+  if !locked
+  then (
+    Lock.unlock ();
+    locked := false)
 ;;
+
+let () = at_exit unlock

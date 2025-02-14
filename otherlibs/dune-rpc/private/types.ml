@@ -27,7 +27,7 @@ end
 module Version = struct
   type t = int * int
 
-  let latest = 3, 11
+  let latest = 3, 18
 
   let sexp : t Conv.value =
     let open Conv in
@@ -166,8 +166,8 @@ module Response = struct
     sum
       [ econstr ok; econstr error ]
       (function
-       | Ok s -> case s ok
-       | Error e -> case e error)
+        | Ok s -> case s ok
+        | Error e -> case e error)
   ;;
 
   let fields =
@@ -256,8 +256,7 @@ module Version_negotiation = struct
         iso
           (list (pair Method.Name.sexp (list Method.Version.sexp)))
           (fun x -> Menu x)
-          (function
-           | Menu x -> x))
+          (function Menu x -> x))
     ;;
 
     let to_call t =
@@ -282,8 +281,7 @@ module Version_negotiation = struct
         iso
           (list (pair Method.Name.sexp Method.Version.sexp))
           (fun x -> Selected x)
-          (function
-           | Selected x -> x))
+          (function Selected x -> x))
     ;;
 
     let create x = Selected x
@@ -306,8 +304,8 @@ module Persistent = struct
       sum
         [ econstr packet; econstr close_connection ]
         (function
-         | Packet p -> case p packet
-         | Close_connection -> case () close_connection)
+          | Packet p -> case p packet
+          | Close_connection -> case () close_connection)
     ;;
   end
 
@@ -335,9 +333,9 @@ module Persistent = struct
       sum
         [ econstr new_connection; econstr packet; econstr close_connection ]
         (function
-         | New_connection -> case () new_connection
-         | Packet p -> case p packet
-         | Close_connection -> case () close_connection)
+          | New_connection -> case () new_connection
+          | Packet p -> case p packet
+          | Close_connection -> case () close_connection)
     ;;
   end
 end
@@ -372,14 +370,14 @@ module Packet = struct
             iso
               (both method_ params)
               (fun (method_, params) ->
-                match method_, params with
-                | Some method_, Some params -> Some { Call.method_; params }
-                | None, None -> None
-                | Some _, None | None, Some _ ->
-                  Conv.error (Parse_error { message = "invalid call"; payload = [] }))
+                 match method_, params with
+                 | Some method_, Some params -> Some { Call.method_; params }
+                 | None, None -> None
+                 | Some _, None | None, Some _ ->
+                   Conv.error (Parse_error { message = "invalid call"; payload = [] }))
               (function
-               | Some { Call.method_; params } -> Some method_, Some params
-               | None -> None, None)
+                | Some { Call.method_; params } -> Some method_, Some params
+                | None -> None, None)
           in
           three id result call)
          to_
@@ -413,13 +411,13 @@ module Decl = struct
     type ('req, 'resp) gen = Method.Version.t * ('req, 'resp) Generation.t
 
     let make_gen
-      ~req
-      ~resp
-      ~upgrade_req
-      ~downgrade_req
-      ~upgrade_resp
-      ~downgrade_resp
-      ~version
+          ~req
+          ~resp
+          ~upgrade_req
+          ~downgrade_req
+          ~upgrade_resp
+          ~downgrade_resp
+          ~version
       =
       ( version
       , Generation.T
@@ -476,11 +474,11 @@ module Decl = struct
     type 'payload gen = Method.Version.t * ('payload, unit) Generation.t
 
     let make_gen
-      (type a b)
-      ~(conv : a Conv.value)
-      ~(upgrade : a -> b)
-      ~(downgrade : b -> a)
-      ~version
+          (type a b)
+          ~(conv : a Conv.value)
+          ~(upgrade : a -> b)
+          ~(downgrade : b -> a)
+          ~version
       : b gen
       =
       ( version

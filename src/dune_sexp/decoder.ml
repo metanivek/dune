@@ -7,11 +7,6 @@ let[@inline] loc_compare_start_pos_cnum a b =
   Int.compare a b
 ;;
 
-type hint =
-  { on : string
-  ; candidates : string list
-  }
-
 module Name = struct
   module T = struct
     type t = string
@@ -231,7 +226,7 @@ let result : type a k. k context -> a * k -> a =
        (match cstr with
         | None -> User_error.raise ~loc:(Ast.loc sexp) [ Pp.text "This value is unused" ]
         | Some s ->
-          User_error.raise ~loc:(Ast.loc sexp) [ Pp.textf "Too many arguments for %s" s ]))
+          User_error.raise ~loc:(Ast.loc sexp) [ Pp.textf "Too many arguments for %S" s ]))
   | Fields _ ->
     (match Name.Map.choose state.unparsed with
      | None -> v
@@ -244,19 +239,12 @@ let result : type a k. k context -> a * k -> a =
        User_error.raise
          ~loc:name_loc
          ~hints:(User_message.did_you_mean name ~candidates:state.known)
-         [ Pp.textf "Unknown field %s" name ])
+         [ Pp.textf "Unknown field %S" name ])
 ;;
 
 let parse t context sexp =
   let ctx = Values (Ast.loc sexp, None, context) in
   result ctx (t ctx [ sexp ])
-;;
-
-let set_input : type k. Ast.t list -> (unit, k) parser =
-  fun sexps context _ ->
-  match context with
-  | Values _ -> (), sexps
-  | Fields _ -> (), Fields.of_values sexps
 ;;
 
 let capture ctx state =
@@ -274,7 +262,7 @@ let end_of_list (Values (loc, cstr, _)) =
   | None ->
     let loc = Loc.set_start_to_stop loc in
     User_error.raise ~loc [ Pp.text "Premature end of list" ]
-  | Some s -> User_error.raise ~loc [ Pp.textf "Not enough arguments for %s" s ]
+  | Some s -> User_error.raise ~loc [ Pp.textf "Not enough arguments for %S" s ]
 [@@inline never] [@@specialise never] [@@local never]
 ;;
 
@@ -596,9 +584,8 @@ let map_validate t ~f ctx state1 =
     raise (User_error.E msg)
 ;;
 
-(** TODO: Improve consistency of error messages, e.g. use %S consistently for
-    field names: see [field_missing] and [field_present_too_many_times]. *)
-let field_missing loc name = User_error.raise ~loc [ Pp.textf "field %s missing" name ]
+let field_missing ?hints loc name =
+  User_error.raise ~loc ?hints [ Pp.textf "Field %S is missing" name ]
 [@@inline never] [@@specialise never] [@@local never]
 ;;
 
@@ -738,11 +725,11 @@ let fields_mutual_exclusion_violation loc names =
 ;;
 
 let fields_mutually_exclusive
-  ?on_dup
-  ?default
-  fields
-  ((Fields (loc, _, _) : _ context) as ctx)
-  state
+      ?on_dup
+      ?default
+      fields
+      ((Fields (loc, _, _) : _ context) as ctx)
+      state
   =
   let res, state =
     traverse
