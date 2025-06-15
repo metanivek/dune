@@ -58,7 +58,11 @@ module Dune_env = Dune_env
 module Js_of_ocaml = Js_of_ocaml
 module Menhir = Menhir
 module Rule_mode_decoder = Rule_mode_decoder
+module Mode_conf = Mode_conf
 
 (* CR-someday rgrinberg: perhaps wrap these under [Stanzas]? *)
 module Copy_files = Copy_files
 module Enabled_if = Enabled_if
+module Alias_conf = Alias_conf
+module Stanza_common = Stanza_common
+module Include_subdirs = Include_subdirs
