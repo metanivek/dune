@@ -1,4 +1,4 @@
-(lang dune 3.19)
+(lang dune 3.20)
 ;          ^^^^
 ; When changing the version, don't forget to regenerate *.opam files
 ; by running [dune build].
@@ -12,6 +12,10 @@
 
 ; Reserved for Dune itself. This is to help with the bootstrap
 (using dune-bootstrap-info 0.1)
+
+;; This is required to allow Dune to access OxCaml variable. It
+;; won't affect the behaviour of Dune if OxCaml is not available.
+(using oxcaml 0.1)
 
 (license MIT)
 (maintainers "Jane Street Group, LLC <opensource@janestreet.com>")
